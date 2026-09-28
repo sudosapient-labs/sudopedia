@@ -1,5 +1,5 @@
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js"
-import { db } from "@repo/db"
+import { db, eq } from "@repo/db"
 import type { McpOAuthStateContext } from "@repo/db/schema/brain/mcp"
 import { mcpOAuthState } from "@repo/db/schema/brain/mcp"
 import { connectorPause } from "@repo/lib/connector-availability"
@@ -59,6 +59,34 @@ export function publicApiOrigin(env: Env, reqUrl: string): string {
 }
 
 export async function startMcpConnect(
+	args: StartMcpConnectArgs,
+): Promise<StartMcpConnectResult> {
+	const result = await startProviderConnect(args)
+	if (!result.ok || !("authUrl" in result)) return result
+
+	const [row] = await db(args.env)
+		.select({ context: mcpOAuthState.context })
+		.from(mcpOAuthState)
+		.where(eq(mcpOAuthState.stateToken, result.stateToken))
+		.limit(1)
+	if (!row) return { ok: false, error: "authorization state expired" }
+	await db(args.env)
+		.update(mcpOAuthState)
+		.set({
+			context: {
+				...row.context,
+				approval: { userId: args.userId, authorizationUrl: result.authUrl },
+			},
+		})
+		.where(eq(mcpOAuthState.stateToken, result.stateToken))
+
+	const url = new URL(mcpCallbackUrl(args.callbackOrigin))
+	url.pathname = "/brain/mcp-connections/authorize"
+	url.searchParams.set("state", result.stateToken)
+	return { ...result, authUrl: url.toString() }
+}
+
+async function startProviderConnect(
 	args: StartMcpConnectArgs,
 ): Promise<StartMcpConnectResult> {
 	const slug = args.slug.toLowerCase()

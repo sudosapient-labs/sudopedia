@@ -259,16 +259,23 @@ export async function postConnectCard(
 
 		// Stamp each state with the card message + button set so the callback can rebuild it.
 		await Promise.all(
-			entries.map((e) =>
-				db(env)
+			entries.map(async (e) => {
+				const [row] = await db(env)
+					.select({ context: mcpOAuthState.context })
+					.from(mcpOAuthState)
+					.where(eq(mcpOAuthState.stateToken, e.stateToken))
+					.limit(1)
+				if (!row) return
+				await db(env)
 					.update(mcpOAuthState)
 					.set({
 						context: {
+							...row.context,
 							slack: { ...base, threadTs: messageTs, messageTs, buttons },
 						},
 					})
-					.where(eq(mcpOAuthState.stateToken, e.stateToken)),
-			),
+					.where(eq(mcpOAuthState.stateToken, e.stateToken))
+			}),
 		)
 		return true
 	} catch (error) {

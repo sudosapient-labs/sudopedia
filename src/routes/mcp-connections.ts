@@ -68,6 +68,23 @@ function canManageShared(c: Context<AppContext>): boolean {
 	return role === ROLE_OWNER || role === ROLE_ADMIN
 }
 
+function canApproveConnect(
+	c: Context<AppContext>,
+	state: typeof mcpOAuthState.$inferSelect,
+): boolean {
+	const user = c.get("user")
+	const org = c.get("org")
+	const approval = state.context?.approval
+	return Boolean(
+		approval?.authorizationUrl &&
+		user &&
+		org &&
+		user.id === approval.userId &&
+		org.id === state.orgId &&
+		(state.userId === null ? canManageShared(c) : state.userId === user.id),
+	)
+}
+
 function orgHasBrain(org: BrainOrgLike | null | undefined): boolean {
 	return isCompanyBrainOrg(org)
 }
@@ -263,8 +280,36 @@ export const brainMcpConnectionsRoutes = new Hono<AppContext>()
 		if ("authUrl" in result) return c.json({ authUrl: result.authUrl })
 		return c.json({ error: "could not start authorization" }, 502)
 	})
+	.get("/authorize", async (c) => {
+		c.header("Cache-Control", "no-store")
+		const state = c.req.query("state")
+		if (!state) return c.json({ error: "missing state" }, 400)
+		const [stateRow] = await db(c.env)
+			.select()
+			.from(mcpOAuthState)
+			.where(
+				and(
+					eq(mcpOAuthState.stateToken, state),
+					gt(mcpOAuthState.expiresAt, new Date()),
+				),
+			)
+			.limit(1)
+		if (!stateRow) return c.json({ error: "invalid or expired state" }, 400)
+		if (!c.get("user")) {
+			return c.html(
+				'<p>Sign in to Company Brain with your own account, then reopen the connection link.</p><a href="/auth/slack/login">Sign in</a>',
+				401,
+			)
+		}
+		if (!canApproveConnect(c, stateRow))
+			return c.json({ error: "connection belongs to another account" }, 403)
+		const authorizationUrl = stateRow.context?.approval?.authorizationUrl
+		if (!authorizationUrl) return c.json({ error: "invalid state" }, 400)
+		return c.redirect(authorizationUrl, 303)
+	})
 	// OAuth redirect target: exchange code, persist connection, redirect back.
 	.get("/callback", async (c) => {
+		c.header("Cache-Control", "no-store")
 		const code = c.req.query("code")
 		const state = c.req.query("state")
 		if (!code || !state) return c.json({ error: "missing code/state" }, 400)
@@ -286,6 +331,10 @@ export const brainMcpConnectionsRoutes = new Hono<AppContext>()
 				.where(eq(mcpOAuthState.stateToken, state))
 			return c.json({ error: "invalid or expired state" }, 400)
 		}
+		if (!c.get("user"))
+			return c.json({ error: "sign in and start a new connection" }, 401)
+		if (!canApproveConnect(c, stateRow))
+			return c.json({ error: "connection belongs to another account" }, 403)
 		if (stateRow.runtime === "embedded") {
 			const consumed = await consumeGoogleOAuthState(c.env, state)
 			if (!consumed?.userId || !consumed.pkceVerifierEnc) {

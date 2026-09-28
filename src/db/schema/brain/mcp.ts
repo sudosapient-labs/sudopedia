@@ -154,6 +154,10 @@ export const mcpConnectionRelations = relations(mcpConnection, ({ one }) => ({
 // Transient OAuth-flow state (CSRF token + PKCE verifier + DCR client info)
 // during the connect redirect.
 export type McpOAuthStateContext = {
+	approval?: {
+		userId: string
+		authorizationUrl: string
+	}
 	slack?: {
 		teamId: string
 		channel: string

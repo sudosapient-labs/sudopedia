@@ -28,6 +28,8 @@ Tool connectors are live integrations (MCP under the hood). They don't just inde
 
 Connect them from **Configure → Integrations** in the app, or from the buttons in the bot's welcome DM.
 
+OAuth connection links require you to sign in to Company Brain with the account that requested the connection before visiting the provider. The same account must remain signed in when the provider sends you back; if the link expires or you switch accounts, start a new connection.
+
 You can connect tools at two scopes: **Organization (shared)** or **Personal (yours)**. Adding an org-shared connection needs an owner or admin. The full rule of thumb lives on [The permissions graph](permissions.md): reads use your personal connection when you have one and fall back to the org one; writes only ever run under your own account, so the action is attributed to you.
 
 If neither you nor the org has a tool connected, but a teammate does, Company Brain can ask them to **lease** temporary access for that one request. See [Leasing](permissions.md#leasing-borrowing-access-for-one-request).
