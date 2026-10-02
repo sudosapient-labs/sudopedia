@@ -1,0 +1,17 @@
+// Separate loopback-only manual UI fixture. Never deploy this entrypoint.
+{
+	"name": "sudopedia-external-ui-fixture",
+	"main": "worker.ts",
+	"tsconfig": "../../tsconfig.json",
+	"compatibility_date": "2025-06-22",
+	"compatibility_flags": ["nodejs_compat"],
+	"vars": { "ENCRYPTION_SECRET": "fictional-local-session-signing-key", "EXTERNAL_PUBLIC_URL": "http://127.0.0.1:8799" },
+	"d1_databases": [{ "binding": "DB", "database_name": "external-ui-fixture", "database_id": "00000000-0000-0000-0000-000000000002" }],
+	"durable_objects": { "bindings": [{ "name": "COMPANY_BRAIN_AGENT", "class_name": "TestSkillAgent" }] },
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestSkillAgent"] }],
+	"assets": { "directory": "../../dist/web", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/brain/*", "/auth/*", "/fixture/*", "/mcp"] },
+	"unsafe": { "bindings": [
+		{ "type": "ratelimit", "name": "EXTERNAL_RATE_LIMITER", "namespace_id": "2203", "simple": { "limit": 60, "period": 60 } },
+		{ "type": "ratelimit", "name": "EXTERNAL_MANAGEMENT_RATE_LIMITER", "namespace_id": "2204", "simple": { "limit": 10, "period": 60 } }
+	] }
+}

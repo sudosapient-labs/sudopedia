@@ -22,6 +22,7 @@ import CompanyBrainConnections from "@/components/settings/company-brain-connect
 import CompanyBrainModels from "@/components/settings/company-brain-models"
 import CompanyBrainProactivity from "@/components/settings/company-brain-proactivity"
 import CompanyBrainSkills from "@/components/settings/company-brain-skills"
+import ExternalAccess from "@/components/settings/external-access"
 import Proactiveness from "@/components/settings/proactiveness"
 import { ProactivenessIcon } from "@/components/settings/proactiveness-icon"
 import { WorkspacePrompt } from "@/components/settings/workspace-prompt"
@@ -41,6 +42,12 @@ const SECTIONS: {
 	description: string
 	icon: React.ComponentType<{ className?: string }>
 }[] = [
+	{
+		id: "external-access",
+		label: "External Access",
+		description: "Connect external agents to shared knowledge and organization procedures with scoped, expiring read-only credentials.",
+		icon: Blocks,
+	},
 	{
 		id: "tools",
 		label: "Integrations",
@@ -192,6 +199,8 @@ export function ConfigureView() {
 								<CompanyBrainProactivity />
 							) : activeSection === "skills" ? (
 								<CompanyBrainSkills onUnsavedChangesChange={setSkillsDirty} />
+							) : activeSection === "external-access" ? (
+								<ExternalAccess />
 							) : (
 								<Proactiveness />
 							)}

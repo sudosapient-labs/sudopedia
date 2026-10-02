@@ -12,6 +12,7 @@
 		"db:migrate:local": "wrangler d1 migrations apply DB --local",
 		"db:migrate": "wrangler d1 migrations apply DB --remote",
 		"test": "vitest run",
+		"test:external-runtime": "node --experimental-strip-types scripts/verify-external.ts",
 		"build:web": "bun web/build.ts"
 	},
 	"dependencies": {
