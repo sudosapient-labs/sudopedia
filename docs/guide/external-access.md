@@ -118,8 +118,10 @@ curl https://sudopedia.example.com/brain/external/v1/skills/load \
 ```
 
 Search accepts `query` (1–2,000 characters), `limit` (default 5, max 20), and up to
-10 canonical topic tags (each max 100 characters; `person_`, `topic_`, `project_`,
+10 canonical topic tags (each max 128 characters; `person_`, `topic_`, `project_`,
 `customer_`, `team_` with lowercase alphanumeric/underscore/hyphen suffixes).
+Hierarchical tags use nonempty slash-separated segments, for example
+`topic_releases/rollback`; returned tags retain their full paths.
 Tags narrow a server-built metadata filter; they cannot select containers.
 Identity, role, org, container overrides and arbitrary provider filters are
 strictly rejected. One bounded hybrid provider call uses threshold 0.3 by default,

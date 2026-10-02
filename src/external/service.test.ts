@@ -9,7 +9,7 @@ import {
 } from "./limits"
 import { checkRequest, isExternalPath } from "./security"
 import { ExternalError } from "./errors"
-import type { Principal } from "./contracts"
+import { searchSchema, type Principal } from "./contracts"
 
 const skillId = "12345678-1234-4234-8234-123456789012"
 function fixture() {
@@ -60,6 +60,44 @@ function fixture() {
 }
 
 describe("external shared service", () => {
+	it("passes hierarchical canonical tags through search and result projection", async () => {
+		const { deps } = fixture()
+		const topicTags = [
+			"topic_releases/rollback",
+			"project_aurora/releases/staged_rollout",
+			`topic_${"a".repeat(122)}`,
+		]
+		deps.search = vi.fn(async () => ({
+			results: [
+				{
+					id: "release",
+					memory: "Rollback procedure",
+					metadata: { memory_scope: "shared", brain_tags: topicTags },
+				},
+			],
+		}))
+		const result = await execute(deps, "search", { query: "rollback", topicTags })
+		expect(deps.search).toHaveBeenCalledWith(
+			{ query: "rollback", limit: 5, topicTags },
+			expect.any(AbortSignal),
+		)
+		expect(result).toMatchObject({ results: [{ topicTags }] })
+	})
+	it("rejects malformed paths, unsupported prefixes and oversized tags", () => {
+		for (const tag of [
+			"/topic_releases",
+			"topic_releases/",
+			"topic_releases//rollback",
+			"topic_releases/../private",
+			"topic_releases/Rollback",
+			"user_private/rollback",
+			`topic_${"a".repeat(123)}`,
+		]) {
+			expect(
+				searchSchema.safeParse({ query: "rollback", topicTags: [tag] }).success,
+			).toBe(false)
+		}
+	})
 	it("revalidates revocation, live grants and caller identity on every call", async () => {
 		const f = fixture()
 		await execute(f.deps, "search", { query: "release" })

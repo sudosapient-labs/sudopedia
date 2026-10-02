@@ -9,8 +9,10 @@ export const grantsSchema = z
 	.refine((v) => new Set(v).size === v.length)
 export const topicTagSchema = z
 	.string()
-	.max(100)
-	.regex(/^(?:person|topic|project|customer|team)_[a-z0-9][a-z0-9_-]*$/)
+	.max(128)
+	.regex(
+		/^(?:person|topic|project|customer|team)_[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)*$/,
+	)
 export const searchSchema = z.strictObject({
 	query: z.string().trim().min(1).max(2000),
 	limit: z.number().int().min(1).max(20).default(5),
