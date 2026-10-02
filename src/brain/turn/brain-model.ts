@@ -11,6 +11,11 @@ import {
 	type SupportedModelProvider,
 } from "@/lib/model-registry"
 import { brainFallbackModelFor } from "./model-profile"
+import {
+	customModelEndpoint,
+	customModelEndpointError,
+	hasCustomModelEndpoint,
+} from "../../setup/model-endpoint"
 
 // Sentinel the gateway swaps for its stored provider key (BYOK).
 const GATEWAY_INJECTED_KEY = "CF_TEMP_TOKEN"
@@ -53,6 +58,7 @@ function openRouterKey(env: Env): string | undefined {
 }
 
 function canReach(provider: SupportedModelProvider, env: Env): boolean {
+	if (hasCustomModelEndpoint(env)) return customModelEndpointError(env) === null
 	return Boolean(providerKey(provider, env)?.trim() || openRouterKey(env))
 }
 
@@ -86,7 +92,7 @@ function resolveModel(modelName: SupportedModel, env: Env): SupportedModel {
 	const fallbackProvider = availableProviders(env)[0]
 	if (!fallbackProvider) {
 		const error = new Error(
-			"No model provider key is set. Set MODEL_API_KEY to an Anthropic, OpenAI, Google, xAI or OpenRouter key.",
+			"No model provider key is set. Set MODEL_API_KEY to a supported provider key, or set MODEL_BASE_URL and MODEL_API_KEY for a custom endpoint.",
 		)
 		captureException(error, { tags: { feature: "company_brain" } })
 		throw error
@@ -111,6 +117,14 @@ export function brainProviderModel(
 	apiKeyOverride?: string,
 ): LanguageModel {
 	const { modelId, provider } = getModelInfo(modelName)
+	const endpoint = customModelEndpoint(env)
+	if (endpoint) {
+		return createOpenAI({
+			name: "custom",
+			baseURL: endpoint.baseURL,
+			apiKey: endpoint.apiKey,
+		}).chat(endpoint.modelId ?? modelId)
+	}
 	const directKey = providerKey(provider, env)?.trim()
 	const routerKey = openRouterKey(env)
 	if (apiKeyOverride === undefined && !directKey && routerKey) {
@@ -138,6 +152,7 @@ function brainGatewayConfig(env: Env) {
 }
 
 export function hasBrainGateway(env: Env): boolean {
+	if (hasCustomModelEndpoint(env)) return false
 	return brainGatewayConfig(env) !== null
 }
 
@@ -154,7 +169,7 @@ export function wrapBrainGateway(
 	if (!primary) {
 		throw new Error("[company-brain] no model candidates provided")
 	}
-	const config = brainGatewayConfig(env)
+	const config = hasBrainGateway(env) ? brainGatewayConfig(env) : null
 	if (!config) return primary
 	const aigateway = createAiGateway(config)
 	// ai-gateway-provider types expect LanguageModelV3[]; our models match at runtime.
@@ -162,6 +177,9 @@ export function wrapBrainGateway(
 }
 
 export function getBrainModel(modelName: SupportedModel, env: Env) {
+	// Explicit custom routing must not fall back to native providers or replace
+	// the proxy's key with the Cloudflare gateway's BYOK sentinel.
+	if (hasCustomModelEndpoint(env)) return brainProviderModel(modelName, env)
 	const resolved = resolveModel(modelName, env)
 	const gateway = hasBrainGateway(env)
 	const key = gateway ? GATEWAY_INJECTED_KEY : undefined

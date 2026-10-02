@@ -113,6 +113,23 @@ Everything else is provisioned for you: D1, KV, Durable Objects and Workers AI.
 
 Your team signs in with Slack at `/` to see the brain's home, a live graph of everything it remembers, and settings for tools, models, proactivity, automations and skills.
 
+### Using your own LLM proxy
+
+For an OpenAI-compatible endpoint such as LiteLLM, set these deployment variables/secrets (or add them to `.dev.vars` locally):
+
+```dotenv
+MODEL_BASE_URL="https://llm-proxy.example.com/v1"
+MODEL_API_KEY="your-proxy-api-key"
+# Optional: exact model ID/alias accepted by your proxy
+MODEL_ID="my-model-alias"
+```
+
+Use the API base URL, not the full `/chat/completions` URL. Requests use the Chat Completions API with bearer authentication; the proxy must support streaming, tool calls and structured JSON output for the brain to work fully. HTTPS is recommended; HTTP is supported for local proxies. Keep `MODEL_API_KEY` as a secret in Cloudflare's **Settings → Variables and Secrets**, or use `wrangler secret put MODEL_API_KEY`.
+
+When `MODEL_BASE_URL` is set, the key is used as-is, without provider-prefix detection. This mode takes precedence over direct provider keys, OpenRouter and Cloudflare AI Gateway for brain model calls; invalid configuration fails rather than sending the key to another service. Without `MODEL_ID`, requests use the selected model's native API ID (e.g. `grok-4.5` or `claude-haiku-4-5-20251001`), without OpenRouter's vendor prefix. With `MODEL_ID`, **all** brain model calls use that exact ID, including triage and research. Provider-native xAI web search still requires a separate `XAI_API_KEY`; a proxy key does not enable it.
+
+Leave `MODEL_BASE_URL` unset to keep the existing provider-key setup. The existing `OPENROUTER_BASE_URL` override remains available for routers that expect `vendor/model` IDs.
+
 ### Free plan or Workers Paid?
 
 Company Brain runs on Cloudflare's free plan. [Workers Paid](https://developers.cloudflare.com/workers/platform/pricing/) ($5/mo) is better, and worth it if your team leans on the brain:

@@ -9,6 +9,14 @@ SUPERMEMORY_API_KEY=""
 # and xAI models.
 MODEL_API_KEY=""
 
+# Or connect your own OpenAI-compatible proxy (e.g. LiteLLM). Use its API base
+# URL, including /v1 if needed, and put its key in MODEL_API_KEY above. Keys may
+# have any format. Custom routing takes precedence over provider/gateway keys.
+# MODEL_BASE_URL="https://llm-proxy.example.com/v1"
+# Optional: exact model ID/alias for ALL brain calls (main, triage, research).
+# Without this, the selected model's native API ID is sent, without a vendor prefix.
+# MODEL_ID="my-model-alias"
+
 # Or set providers explicitly, e.g. to give it more than one:
 # ANTHROPIC_API_KEY=""
 # OPENAI_API_KEY=""
