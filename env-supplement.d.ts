@@ -1,5 +1,13 @@
 /** Secrets, declared here because wrangler only generates types for bindings. */
 interface Env {
+	/** Explicit canonical origin for external access; never inferred from request headers. */
+	EXTERNAL_PUBLIC_URL?: string
+	EXTERNAL_MAX_LIFETIME_DAYS?: string
+	EXTERNAL_SEARCH_THRESHOLD?: string
+	EXTERNAL_SEARCH_DAILY_QUOTA?: string
+	EXTERNAL_READ_DAILY_QUOTA?: string
+	EXTERNAL_RATE_LIMITER: { limit(options: { key: string }): Promise<{ success: boolean }> }
+	EXTERNAL_MANAGEMENT_RATE_LIMITER: { limit(options: { key: string }): Promise<{ success: boolean }> }
 	SUPERMEMORY_API_KEY: string
 	/** Any one provider's key; its prefix decides which provider it is. */
 	MODEL_API_KEY?: string
