@@ -10,6 +10,10 @@ import { slackCredentials, storeSlackCredentials } from "./config-store"
 import { slackAppManifest } from "./manifest"
 import { setupPage } from "./page"
 import { providerForModelKey } from "./secrets"
+import {
+	customModelEndpointError,
+	hasCustomModelEndpoint,
+} from "./model-endpoint"
 import { sandboxBackend } from "@/lib/brain/tools/sandbox/availability"
 
 export const setupRoutes = new Hono<AppContext>()
@@ -43,9 +47,12 @@ export const setupRoutes = new Hono<AppContext>()
 					("error" in migrations ? migrations.error : null),
 				hasMemoryKey: Boolean(c.env.SUPERMEMORY_API_KEY?.trim()),
 				modelKeyUnrecognized: Boolean(
+					!hasCustomModelEndpoint(c.env) &&
 					c.env.MODEL_API_KEY?.trim() &&
-						!providerForModelKey(c.env.MODEL_API_KEY.trim()),
+					!providerForModelKey(c.env.MODEL_API_KEY.trim()),
 				),
+				customModelEndpoint: hasCustomModelEndpoint(c.env),
+				modelEndpointError: customModelEndpointError(c.env),
 				sandbox: sandboxBackend(c.env),
 				providers,
 				slackConfigured: Boolean(slack),

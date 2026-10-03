@@ -3,11 +3,20 @@
 # Get one at https://console.supermemory.ai
 SUPERMEMORY_API_KEY=""
 
-# One model API key: Anthropic, OpenAI, Google, xAI or OpenRouter. Paste whichever
-# you have; the brain tells them apart by prefix. An OpenRouter key (sk-or-)
-# reaches every provider's models. The prompts were tuned against Anthropic
-# and xAI models.
+# A provider key, or your own proxy's key when MODEL_BASE_URL is set below.
+# Without a custom URL, the brain detects Anthropic, OpenAI, Google, xAI and
+# OpenRouter keys by prefix. An OpenRouter key (sk-or-) reaches every provider.
 MODEL_API_KEY=""
+
+# Optional: your OpenAI-compatible proxy's API base URL, including /v1 if needed
+# (e.g. https://llm-proxy.example.com/v1). Leave blank for native providers or
+# OpenRouter. With a URL set, MODEL_API_KEY accepts any proxy key format.
+# These uncommented entries expose the fields in Deploy to Cloudflare; they
+# are stored as secrets and aren't overwritten by later Wrangler deployments.
+MODEL_BASE_URL=""
+# Optional: exact model ID/alias for ALL brain calls (main, triage, research).
+# Leave blank to send the selected model's native API ID, without a vendor prefix.
+MODEL_ID=""
 
 # Or set providers explicitly, e.g. to give it more than one:
 # ANTHROPIC_API_KEY=""

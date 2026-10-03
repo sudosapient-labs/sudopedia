@@ -5,6 +5,8 @@ type PageParams = {
 	migrationError: string | null
 	hasMemoryKey: boolean
 	modelKeyUnrecognized: boolean
+	customModelEndpoint: boolean
+	modelEndpointError: string | null
 	sandbox: "daytona" | "container" | null
 	providers: string[]
 	slackConfigured: boolean
@@ -66,11 +68,15 @@ function keysBody(params: PageParams): string {
 			`<li><strong><code>SUPERMEMORY_API_KEY</code></strong> is missing. This is where the brain keeps its memory; get a key at <a href="https://console.supermemory.ai" target="_blank" rel="noreferrer">console.supermemory.ai</a>.</li>`,
 		)
 	}
-	if (params.providers.length === 0) {
+	if (params.modelEndpointError) {
+		rows.push(
+			`<li><strong>Custom model endpoint:</strong> ${escapeHtml(params.modelEndpointError)}</li>`,
+		)
+	} else if (params.providers.length === 0) {
 		rows.push(
 			params.modelKeyUnrecognized
-				? "<li><strong><code>MODEL_API_KEY</code></strong> is set, but it doesn't look like an Anthropic (<code>sk-ant-</code>), OpenAI (<code>sk-</code>), Google (<code>AIza</code>), xAI (<code>xai-</code>) or OpenRouter (<code>sk-or-</code>) key. Check it, or set the provider's own variable, like <code>ANTHROPIC_API_KEY</code>.</li>"
-				: "<li><strong><code>MODEL_API_KEY</code></strong> is missing. Use an Anthropic, OpenAI, Google, xAI or OpenRouter key, whichever you have.</li>",
+				? "<li><strong><code>MODEL_API_KEY</code></strong> is set, but it doesn't look like an Anthropic (<code>sk-ant-</code>), OpenAI (<code>sk-</code>), Google (<code>AIza</code>), xAI (<code>xai-</code>) or OpenRouter (<code>sk-or-</code>) key. For a custom OpenAI-compatible endpoint, also set <code>MODEL_BASE_URL</code>. Otherwise check the key, or set the provider's own variable, like <code>ANTHROPIC_API_KEY</code>.</li>"
+				: "<li><strong><code>MODEL_API_KEY</code></strong> is missing. Use an Anthropic, OpenAI, Google, xAI or OpenRouter key, or set it to your proxy's key together with <code>MODEL_BASE_URL</code>.</li>",
 		)
 	}
 	return `<ul class="todo">${rows.join("")}</ul><p>${SECRET_HOW}</p>`
@@ -141,9 +147,9 @@ export function setupPage(params: PageParams): string {
 	}
 	const allDone = keysDone && params.slackConfigured && installed
 
-	const providerNames = params.providers
-		.map((p) => PROVIDER_NAMES[p] ?? p)
-		.join(", ")
+	const providerNames = params.customModelEndpoint
+		? "your custom OpenAI-compatible endpoint"
+		: params.providers.map((p) => PROVIDER_NAMES[p] ?? p).join(", ")
 
 	return `<!doctype html>
 <html lang="en">

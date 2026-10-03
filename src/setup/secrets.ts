@@ -1,3 +1,5 @@
+import { hasCustomModelEndpoint } from "./model-endpoint"
+
 const ENCRYPTION_SECRET_KV_KEY = "deployment:encryption-secret"
 
 /**
@@ -35,6 +37,8 @@ export function providerForModelKey(
 }
 
 function applyModelApiKey(env: Env): void {
+	// Proxy keys can have any format. Never assign them to a native provider.
+	if (hasCustomModelEndpoint(env)) return
 	const key = env.MODEL_API_KEY?.trim()
 	if (!key) return
 	switch (providerForModelKey(key)) {
@@ -55,7 +59,7 @@ function applyModelApiKey(env: Env): void {
 			return
 		default:
 			console.warn(
-				"[setup] MODEL_API_KEY doesn't look like an Anthropic, OpenAI, Google, xAI or OpenRouter key; set the provider's own variable instead.",
+				"[setup] MODEL_API_KEY doesn't look like an Anthropic, OpenAI, Google, xAI or OpenRouter key; set MODEL_BASE_URL for a custom endpoint, or set the provider's own variable instead.",
 			)
 	}
 }

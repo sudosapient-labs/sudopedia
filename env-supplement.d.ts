@@ -1,8 +1,12 @@
 /** Secrets, declared here because wrangler only generates types for bindings. */
 interface Env {
 	SUPERMEMORY_API_KEY: string
-	/** Any one provider's key; its prefix decides which provider it is. */
+	/** Provider key detected by prefix, or the custom endpoint's key when MODEL_BASE_URL is set. */
 	MODEL_API_KEY?: string
+	/** OpenAI-compatible API base URL; overrides direct providers and Cloudflare AI Gateway. */
+	MODEL_BASE_URL?: string
+	/** Optional exact model ID/alias sent to the custom endpoint for all brain model calls. */
+	MODEL_ID?: string
 	ANTHROPIC_API_KEY?: string
 	OPENAI_API_KEY?: string
 	GOOGLE_GENERATIVE_AI_API_KEY?: string

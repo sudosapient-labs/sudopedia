@@ -6,11 +6,11 @@ Setting up Company Brain is a few one-time steps for whoever deploys it. Everyon
 
 ## 1. Deploy and open `/setup`
 
-Deploy the worker (the Deploy to Cloudflare button, or `wrangler deploy`). It asks for a supermemory API key and one model key. Then open `/setup` on your deployment. It checks, in order:
+Deploy the worker (the Deploy to Cloudflare button, or `wrangler deploy`). The deployment page shows a supermemory API key, one model key, and the optional `MODEL_BASE_URL` and `MODEL_ID` fields for your own LLM proxy. These inputs are stored as Worker secrets and persist across code deployments. For an existing Worker, add them under **Settings → Variables and Secrets** as **Secret**, then select **Deploy**. Then open `/setup` on your deployment. It checks, in order:
 
 1. **Database:** the D1 migrations have run. The worker applies them itself on its first request; if that failed, the page shows why and a **Run migrations** button to retry.
 2. **Memory:** `SUPERMEMORY_API_KEY` is set.
-3. **Model:** `MODEL_API_KEY` holds an Anthropic, OpenAI, Google, xAI or OpenRouter key (the provider is detected from the key), or a provider-specific variable like `ANTHROPIC_API_KEY` is set. With an OpenRouter key every model runs through OpenRouter; a provider's own key, when set, still takes precedence for that provider.
+3. **Model:** `MODEL_API_KEY` holds an Anthropic, OpenAI, Google, xAI or OpenRouter key (the provider is detected from the key), or a provider-specific variable like `ANTHROPIC_API_KEY` is set. With an OpenRouter key every model runs through OpenRouter; a provider's own key, when set, still takes precedence for that provider. Alternatively, set `MODEL_BASE_URL` to your own OpenAI-compatible API base URL and `MODEL_API_KEY` to your proxy's key (any format). This takes precedence over provider and gateway routing. Optionally set `MODEL_ID` to the exact model ID/alias your proxy accepts for all brain calls. See [Using your own LLM proxy](../../README.md#using-your-own-llm-proxy).
 4. **Slack:** the Slack app credentials are stored.
 
 > [!NOTE]

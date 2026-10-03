@@ -9,6 +9,10 @@
 		"enable_ctx_exports"
 	],
 	"minify": true,
+	// Preserve dashboard-configured variables across code deployments. Custom
+	// model inputs are declared in .dev.vars.example as secrets, not blank vars
+	// here, so committed defaults cannot overwrite the deployment's endpoint.
+	"keep_vars": true,
 	"build": {
 		"command": "bun run build:web",
 		"watch_dir": ["src", "web"]
