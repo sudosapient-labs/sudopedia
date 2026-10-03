@@ -42,6 +42,7 @@
 	},
 	"vars": {
 		"PUBLIC_URL": "https://sudopedia.sudosapient.dev",
+		"EXTERNAL_PUBLIC_URL": "https://sudopedia.sudosapient.dev",
 		// "on" once the Workers Paid block below is enabled: sandbox tools then
 		// run on a Cloudflare container.
 		"CONTAINER_SANDBOX": "off",
