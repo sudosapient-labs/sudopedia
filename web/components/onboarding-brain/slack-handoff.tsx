@@ -29,8 +29,8 @@ export function SlackHandoff({
 				</div>
 				<h2 className="text-[20px] font-semibold text-[#FAFAFA]">
 					{teamName
-						? `Company Brain is live in ${teamName}`
-						: "Company Brain is live in your Slack"}
+						? `Sudopedia is live in ${teamName}`
+						: "Sudopedia is live in your Slack"}
 				</h2>
 				<p className="mt-2 text-[13px] leading-relaxed text-[#8A94A6]">
 					We sent you a DM to get started. Ask it anything about your company —

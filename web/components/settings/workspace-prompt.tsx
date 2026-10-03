@@ -84,7 +84,7 @@ function PromptHeader() {
 					"text-[13px] tracking-[-0.13px] text-[#737373]",
 				)}
 			>
-				Set persistent guidance for how Company Brain works across your
+				Set persistent guidance for how Sudopedia works across your
 				workspace.
 			</p>
 		</div>

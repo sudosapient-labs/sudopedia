@@ -316,7 +316,7 @@ function BrainTimeline({
 					dmSans125ClassName(),
 				)}
 			>
-				Your Company Brain
+				Your Sudopedia
 			</p>
 			<p className="mb-4 mt-0.5 text-[12px] font-medium text-[#737373]">
 				How far you've come.

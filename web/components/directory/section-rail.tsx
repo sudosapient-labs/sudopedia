@@ -9,7 +9,7 @@ export const sectionLabelClass = cn(
 )
 
 // Horizontally scrollable card rail with a section heading — shared by the
-// main integrations directory and the Company Brain connections directory.
+// main integrations directory and the Sudopedia connections directory.
 // Arrows appear only when the content actually overflows.
 export function SectionRail({
 	label,

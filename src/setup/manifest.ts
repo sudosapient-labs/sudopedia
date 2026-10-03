@@ -1,4 +1,4 @@
-export const SLACK_APP_NAME = "Supermemory Company Brain"
+export const SLACK_APP_NAME = "Sudopedia"
 
 /** Slack app manifest for this deployment, with its own URLs filled in. */
 export function slackAppManifest(origin: string, appName = SLACK_APP_NAME) {

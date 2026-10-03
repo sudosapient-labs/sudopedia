@@ -259,7 +259,7 @@ export default function CompanyBrainModels({
 					<span
 						className={cn(dmSans125ClassName(), "text-[12px] text-[#9A9A9A]")}
 					>
-						Choose which models Company Brain uses. Applies to this organization
+						Choose which models Sudopedia uses. Applies to this organization
 						only.
 					</span>
 				</div>

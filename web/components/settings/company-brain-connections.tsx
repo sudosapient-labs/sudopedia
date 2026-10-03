@@ -527,7 +527,7 @@ export default function CompanyBrainConnections() {
 		setCustomOpen(true)
 	}, [])
 
-	// Deep link from Company Brain for apps it cannot authorize on their behalf.
+	// Deep link from Sudopedia for apps it cannot authorize on their behalf.
 	useEffect(() => {
 		if (deepLinkHandled.current) return
 		const slug = new URLSearchParams(window.location.search).get("mcpSetup")

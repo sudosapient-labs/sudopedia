@@ -501,7 +501,7 @@ function AutomationCard({
 										</button>
 									</TooltipTrigger>
 									<TooltipContent className="max-w-[260px]">
-										Only channels Company Brain has been added to are listed —
+										Only channels Sudopedia has been added to are listed —
 										invite the bot to a channel to use it. A DM goes privately
 										to you and can also read your personal connections.
 									</TooltipContent>

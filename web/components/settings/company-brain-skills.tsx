@@ -334,7 +334,7 @@ function CompanyBrainSkillsContent({
 					</div>
 
 					<p className="text-[11px] leading-5 text-[#596270]">
-						{SCOPE_HINTS[scopeFilter]} Skills created through Company Brain
+						{SCOPE_HINTS[scopeFilter]} Skills created through Sudopedia
 						appear here automatically.
 					</p>
 

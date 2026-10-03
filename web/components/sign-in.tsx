@@ -20,7 +20,7 @@ export function SignIn() {
 						"text-[20px] font-semibold text-[#FAFAFA]",
 					)}
 				>
-					Company Brain
+					Sudopedia
 				</h1>
 				<p className={dmSansClassName("mt-2 text-[13px] text-[#8B929E]")}>
 					Sign in with the Slack workspace this brain belongs to.

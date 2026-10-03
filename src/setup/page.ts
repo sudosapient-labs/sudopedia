@@ -156,7 +156,7 @@ export function setupPage(params: PageParams): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Company Brain setup</title>
+<title>Sudopedia setup</title>
 <style>
 	:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e4e4e0; --accent:#000b36; --ok:#2f9e5f; --warn:#b4541a; }
 	@media (prefers-color-scheme: dark) { :root { --bg:#111110; --fg:#f2f2ef; --muted:#9a9a93; --line:#2a2a28; --accent:#c9d1ff; --ok:#4cc38a; --warn:#f0a36a; } }
@@ -202,7 +202,7 @@ export function setupPage(params: PageParams): string {
 </head>
 <body>
 <main>
-	<h1>Set up Company Brain</h1>
+	<h1>Set up Sudopedia</h1>
 	<p class="sub">${escapeHtml(params.origin)}</p>
 	${databaseBanner(params)}
 	${step(

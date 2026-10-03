@@ -66,7 +66,7 @@ const SECTIONS: {
 		id: "proactivity",
 		label: "Proactivity",
 		description:
-			"When Company Brain speaks up in Slack without being asked. Quiet channels are still read and remembered.",
+			"When Sudopedia speaks up in Slack without being asked. Quiet channels are still read and remembered.",
 		icon: ProactivenessIcon,
 	},
 	{
@@ -80,7 +80,7 @@ const SECTIONS: {
 		id: "skills",
 		label: "Skills",
 		description:
-			"Teach Company Brain your team's repeatable processes, formats, and voice with reusable Markdown playbooks.",
+			"Teach Sudopedia your team's repeatable processes, formats, and voice with reusable Markdown playbooks.",
 		icon: BookOpenText,
 	},
 ]
@@ -119,7 +119,7 @@ export function ConfigureView() {
 			className={cn(dmSans125ClassName(), "flex min-h-full w-full flex-col")}
 		>
 			<section
-				aria-label="Configure Company Brain"
+				aria-label="Configure Sudopedia"
 				className="flex flex-1 flex-col rounded-[14px] bg-[#191D24] p-4 shadow-[inset_2.42px_2.42px_4.263px_rgba(11,15,21,0.7)] sm:p-6"
 			>
 				<div className="mx-auto flex w-full max-w-[88rem] flex-1 flex-col gap-5 md:flex-row md:gap-8">

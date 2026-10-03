@@ -126,7 +126,7 @@ export function CompanyBrainHeader() {
 							</div>
 							<div className="ml-1.5 min-w-0 flex flex-col items-start justify-center max-[340px]:hidden sm:ml-2">
 								<p className="max-w-full truncate text-[10px] leading-tight text-[#6B6B6B] sm:text-[11px]">
-									Company Brain
+									Sudopedia
 								</p>
 								<p className="-mt-0.5 max-w-full truncate text-sm leading-none font-semibold text-white/90 sm:text-[15px]">
 									{brandLabel}

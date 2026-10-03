@@ -286,7 +286,7 @@ export default function CompanyBrainProactivity() {
 								>
 									{slackStatusQuery.data?.connected === false
 										? "Connect Slack to set per-channel exceptions."
-										: "Invite Company Brain to a Slack channel to list it here."}
+										: "Invite Sudopedia to a Slack channel to list it here."}
 								</p>
 							)}
 						</div>
