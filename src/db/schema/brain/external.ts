@@ -68,6 +68,15 @@ export const externalMemoryOperation = sqliteTable(
 			.notNull()
 			.references(() => user.id, { onDelete: "cascade" }),
 		requestHash: text("request_hash").notNull(),
+		operation: text("operation").notNull().default("legacy"),
+		// Legacy rows are conservatively treated as potentially dispatched.
+		phase: text("phase").notNull().default("dispatched"),
+		providerAction: text("provider_action"),
+		providerId: text("provider_id"),
+		targetFingerprint: text("target_fingerprint"),
+		deadlineAt: integer("deadline_at"),
+		dispatchedAt: integer("dispatched_at"),
+		reconciledAt: integer("reconciled_at"),
 		state: text("state").notNull(),
 		result: text("result"),
 		createdAt: integer("created_at").notNull(),

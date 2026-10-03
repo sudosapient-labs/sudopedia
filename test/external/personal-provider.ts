@@ -4,6 +4,7 @@ import type {
 	PersonalProvider,
 } from "../../src/external/personal"
 import type { Principal, SearchInput } from "../../src/external/contracts"
+import { fingerprint } from "../../src/external/personal"
 
 type Row = PersonalEntry & {
 	owner: string
@@ -46,7 +47,8 @@ export const fakePersonalProvider: PersonalProvider = {
 		)
 	},
 	async mutate(owner, operation, input, id, operationId, signal, context) {
-		context.onDispatch()
+		await context.onDispatch({ action: operation, providerId: id,
+			fingerprint: context.current ? await fingerprint(context.current) : undefined })
 		personalMutations++
 		if ("content" in input && input.content === "pending fictional fact")
 			return { status: "pending" }
@@ -88,6 +90,8 @@ export const fakePersonalProvider: PersonalProvider = {
 				owner: owner.userId,
 				memory: (input as { content: string }).content,
 				updatedAt: new Date().toISOString(),
+				forgetAfter: operation === "correct" && "retention" in input &&
+					input.retention === "preserve" ? current?.forgetAfter : null,
 				metadata: {
 					...(operation === "correct" ? context.current?.metadata : {}),
 					memory_scope: "personal",

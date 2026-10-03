@@ -132,7 +132,7 @@ export async function handleMcp(
 		"sudopedia_correct_memory",
 		{
 			description:
-				"Correct, supersede or reinforce an existing PERSONAL memory using the exact reference returned by search. Supply the complete replacement fact, not a patch. Old version becomes non-latest; source documents are NOT rewritten. Search again on stale_reference. Retain the same idempotency key for retries; unknown writes need reconciliation, not a new key.",
+					"Correct, supersede or reinforce an existing PERSONAL memory using the exact reference returned by search. Supply the complete replacement fact, not a patch. Durable is the default: clears inherited expiry. For a still-transient fact, explicitly set retention to preserve. Old version becomes non-latest; source documents are NOT rewritten. Search again on stale_reference. Retain the same idempotency key for retries; unknown writes need reconciliation, not a new key.",
 			inputSchema: correctSchema,
 			annotations: {
 				...annotations,

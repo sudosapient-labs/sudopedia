@@ -3,6 +3,7 @@ const client = vi.hoisted(() => ({
 	post: vi.fn(),
 	get: vi.fn(),
 	patch: vi.fn(),
+	add: vi.fn(),
 	search: { memories: vi.fn() },
 	memories: { forget: vi.fn(), updateMemory: vi.fn() },
 }))
@@ -19,24 +20,30 @@ const owner: Principal = {
 	grants: ["memory.personal:write"],
 }
 describe("real provider adapter with mocked public API responses", () => {
-	it.each(["lookup", "provision", "search"])(
+	it.each(["lookup", "provision", "verify-provision", "search"])(
 		"rejects a failed capture %s without locking future writes",
 		async (stage) => {
 			vi.resetAllMocks()
 			client.get.mockResolvedValue({})
 			client.patch.mockResolvedValue({})
+			client.add.mockResolvedValue({ id: "bootstrap", status: "queued" })
 			client.search.memories.mockResolvedValue({ results: [] })
-			client.post.mockResolvedValue({ memories: [{ id: "created" }] })
+			client.post.mockResolvedValue({ memories: [{ id: "created", forgetAfter: null }] })
 			if (stage === "lookup")
 				client.get.mockRejectedValueOnce(new Error("lookup failed"))
 			if (stage === "provision") {
 				client.get.mockRejectedValueOnce({ status: 404 })
-				client.patch.mockRejectedValueOnce(new Error("provision failed"))
+				client.add.mockRejectedValueOnce(new Error("provision failed"))
+			}
+			if (stage === "verify-provision") {
+				client.get.mockRejectedValueOnce({ status: 404 })
+				client.get.mockRejectedValueOnce({ status: 404 })
 			}
 			if (stage === "search")
 				client.search.memories.mockRejectedValueOnce(new Error("search failed"))
 			const journals = new Map<string, Journal>()
 			const store: PersonalStore = {
+				dispatch: vi.fn(async () => {}),
 				reference: async () => "unused",
 				lookup: async () => null,
 				read: async (id) => journals.get(id) ?? null,
@@ -105,6 +112,7 @@ describe("real provider adapter with mocked public API responses", () => {
 			client.memories.updateMemory.mockResolvedValue({
 				id: "new",
 				parentMemoryId: "old",
+				forgetAfter: null,
 			})
 			const onDispatch = vi.fn()
 			await personalProvider({} as Env).mutate(
@@ -176,7 +184,7 @@ describe("real provider adapter with mocked public API responses", () => {
 		vi.resetAllMocks()
 		client.search.memories.mockResolvedValue({ results: [] })
 		client.get.mockResolvedValue({ name: "Existing personal brain" })
-		client.post.mockResolvedValue({ memories: [{ id: "created" }] })
+		client.post.mockResolvedValue({ memories: [{ id: "created", forgetAfter: null }] })
 		const provider = personalProvider({} as Env),
 			signal = new AbortController().signal
 		await provider.mutate(
@@ -204,6 +212,7 @@ describe("real provider adapter with mocked public API responses", () => {
 						{
 							content: "Employee A prefers concise weekly summaries.",
 							isStatic: false,
+							forgetAfter: null,
 							metadata: expect.objectContaining({
 								memory_scope: "personal",
 								source_type: "external-primary-bot",
@@ -220,6 +229,7 @@ describe("real provider adapter with mocked public API responses", () => {
 		client.memories.updateMemory.mockResolvedValue({
 			id: "new-version",
 			parentMemoryId: "old",
+			forgetAfter: null,
 		})
 		await provider.mutate(
 			owner,
@@ -283,7 +293,7 @@ describe("real provider adapter with mocked public API responses", () => {
 			expect(options.body.containerTags).toEqual(["user_employee-a"])
 		expect(client.get).not.toHaveBeenCalled()
 	})
-	it("does not recapture identical live content and provisions only a missing personal container", async () => {
+	it("does not recapture a permanent fact and bootstraps only a missing container without fact extraction", async () => {
 		vi.resetAllMocks()
 		const provider = personalProvider({} as Env),
 			input = {
@@ -292,8 +302,11 @@ describe("real provider adapter with mocked public API responses", () => {
 			},
 			signal = new AbortController().signal
 		client.search.memories.mockResolvedValue({
-			results: [{ memory: input.content }],
+			results: [{ id: "same", memory: input.content }],
 		})
+		client.post.mockResolvedValue({ memoryEntries: [{ id: "same", memory: input.content,
+			updatedAt: "2026-10-01", forgetAfter: null }], pagination: { totalPages: 1 } })
+		client.get.mockResolvedValue({})
 		const context = { onDispatch: vi.fn() }
 		await provider.mutate(
 			owner,
@@ -305,11 +318,11 @@ describe("real provider adapter with mocked public API responses", () => {
 			context,
 		)
 		expect(context.onDispatch).not.toHaveBeenCalled()
-		expect(client.post).not.toHaveBeenCalled()
+		expect(client.post).not.toHaveBeenCalledWith("/v4/memories", expect.anything())
 		client.search.memories.mockResolvedValue({ results: [] })
-		client.get.mockRejectedValue({ status: 404 })
-		client.patch.mockResolvedValue({})
-		client.post.mockResolvedValue({ memories: [{ id: "created" }] })
+		client.get.mockRejectedValueOnce({ status: 404 })
+		client.add.mockResolvedValue({ id: "bootstrap", status: "queued" })
+		client.post.mockResolvedValue({ memories: [{ id: "created", forgetAfter: null }] })
 		await provider.mutate(
 			owner,
 			"capture",
@@ -320,10 +333,12 @@ describe("real provider adapter with mocked public API responses", () => {
 			context,
 		)
 		expect(context.onDispatch).toHaveBeenCalledTimes(1)
-		expect(client.patch).toHaveBeenCalledWith(
-			"/v3/container-tags/user_employee-a",
+		expect(client.add).toHaveBeenCalledWith(
+			expect.objectContaining({ taskType: "superrag", containerTag: "user_employee-a",
+				customId: expect.stringMatching(/^sd_personal_bootstrap_[a-f0-9]{64}$/) }),
 			expect.objectContaining({ maxRetries: 0 }),
 		)
+		expect(client.patch).not.toHaveBeenCalled()
 	})
 	it("keeps shared search requests unchanged while personal reads use only owner memories", async () => {
 		vi.resetAllMocks()
@@ -344,5 +359,55 @@ describe("real provider adapter with mocked public API responses", () => {
 			searchMode: "memories",
 			include: { forgottenMemories: false },
 		})
+	})
+	it.each([undefined, "preserve"] as const)("corrects an expiring fact with retention=%s", async (retention) => {
+		vi.resetAllMocks()
+		const horizon = new Date(Date.now() + 86400000).toISOString()
+		client.memories.updateMemory.mockImplementation(async (body) => ({
+			id: "new", parentMemoryId: "old", forgetAfter: "forgetAfter" in body ? body.forgetAfter : horizon,
+		}))
+		await personalProvider({} as Env).mutate(owner, "correct", {
+			idempotencyKey: crypto.randomUUID(), content: "Durable changed preference", retention,
+		}, "old", "op", new AbortController().signal, {
+			current: { id: "old", memory: "Transient preference", updatedAt: "2026-10-01", forgetAfter: horizon },
+			onDispatch: vi.fn(async () => {}),
+		})
+		const body = client.memories.updateMemory.mock.calls[0]![0]
+		if (retention === "preserve") expect(body).not.toHaveProperty("forgetAfter")
+		else expect(body.forgetAfter).toBeNull()
+	})
+	it("promotes an owner-verified expiring exact repeat while retaining metadata", async () => {
+		vi.resetAllMocks()
+		const current = { id: "old", memory: "Durable preference", updatedAt: "2026-10-01",
+			forgetAfter: new Date(Date.now() + 86400000).toISOString(), metadata: { brain_tags: ["topic_preference"] } }
+		client.get.mockResolvedValue({})
+		client.search.memories.mockResolvedValue({ results: [current] })
+		client.post.mockResolvedValue({ memoryEntries: [current], pagination: { totalPages: 1 } })
+		client.memories.updateMemory.mockResolvedValue({ id: "new", parentMemoryId: "old", forgetAfter: null })
+		const onDispatch = vi.fn(async () => {})
+		await personalProvider({} as Env).mutate(owner, "capture", {
+			idempotencyKey: crypto.randomUUID(), content: current.memory,
+		}, undefined, "reinforcement-op", new AbortController().signal, { onDispatch })
+		expect(client.memories.updateMemory).toHaveBeenCalledWith(expect.objectContaining({
+			id: "old", forgetAfter: null, metadata: expect.objectContaining({
+				brain_tags: current.metadata.brain_tags, external_operation: "reinforcement-op",
+			}),
+		}), expect.anything())
+		expect(onDispatch).toHaveBeenCalledWith(expect.objectContaining({ action: "correct", providerId: "old", fingerprint: expect.any(String) }))
+		expect(client.post).not.toHaveBeenCalledWith("/v4/memories", expect.anything())
+	})
+	it.each(["capture", "correct", "retract"] as const)("never sends %s when durable dispatch persistence fails", async (operation) => {
+		vi.resetAllMocks()
+		client.get.mockResolvedValue({})
+		client.search.memories.mockResolvedValue({ results: [] })
+		await expect(personalProvider({} as Env).mutate(owner, operation, {
+			idempotencyKey: crypto.randomUUID(), content: "Fact", reference: crypto.randomUUID(),
+		}, "old", "op", new AbortController().signal, {
+			current: { id: "old", memory: "Fact", updatedAt: "2026-10-01" },
+			onDispatch: async () => { throw new Error("dispatch persistence unavailable") },
+		})).rejects.toThrow("dispatch persistence unavailable")
+		expect(client.memories.updateMemory).not.toHaveBeenCalled()
+		expect(client.memories.forget).not.toHaveBeenCalled()
+		expect(client.post).not.toHaveBeenCalled()
 	})
 })

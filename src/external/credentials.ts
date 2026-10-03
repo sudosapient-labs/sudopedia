@@ -165,18 +165,33 @@ export async function mintCredential(
 	const secret = `sd_ext_${id}_${Array.from(random, (b) => b.toString(16).padStart(2, "0")).join("")}`
 	const now = Date.now()
 	const expiresAt = now + input.expiresInDays * 86400000
-	// Bounded history: inactive credentials/counters are removed after 30 days.
+	// Scope capacity/history to the actor's personal bucket, or the admin-only
+	// organization bucket. Inactive credentials never spend active capacity.
+	const activeLimit = kind === "personal" ? 5 : 100
+	const historyLimit = kind === "personal" ? 100 : 200
 	await env.DB.prepare(
-		"DELETE FROM external_credential WHERE org_id = ? AND (expires_at < ? OR revoked_at < ?)",
+		`DELETE FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND (expires_at < ? OR revoked_at < ?)`,
 	)
-		.bind(actor.orgId, now - 30 * 86400000, now - 30 * 86400000)
+		.bind(actor.orgId, kind, kind, actor.userId, now - 30 * 86400000, now - 30 * 86400000)
 		.run()
+	await env.DB.prepare(
+		`DELETE FROM external_credential WHERE id IN (
+		SELECT id FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND (expires_at <= ? OR revoked_at IS NOT NULL)
+		ORDER BY created_at, id LIMIT MAX(0, (SELECT COUNT(*) FROM external_credential
+		WHERE org_id = ? AND kind = ? AND (? = 'organization' OR user_id = ?)) - ?))`,
+	).bind(actor.orgId, kind, kind, actor.userId, now,
+		actor.orgId, kind, kind, actor.userId, historyLimit - 1).run()
 	const row = await env.DB.prepare(
 		`INSERT INTO external_credential
 		(id, org_id, user_id, member_id, label, secret_hash, grants, created_at, expires_at, kind)
 		SELECT ?, ?, ?, m.id, ?, ?, ?, ?, ?, ? FROM member m JOIN user u ON u.id = m.user_id
 		WHERE m.user_id = ? AND m.organization_id = ? AND (? = 'personal' OR m.role IN ('owner', 'admin')) AND u.deleted = 0
-		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ?) < 100
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND revoked_at IS NULL AND expires_at > ?) < ?
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?)) < ?
 		RETURNING id`,
 	)
 		.bind(
@@ -193,13 +208,16 @@ export async function mintCredential(
 			actor.orgId,
 			kind,
 			actor.orgId,
+			kind, kind, actor.userId, now, activeLimit,
+			actor.orgId, kind, kind, actor.userId, historyLimit,
 		)
 		.first()
 	if (!row)
 		throw new ExternalError(
 			"credential_limit",
 			429,
-			"Organization credential limit reached (100)",
+			kind === "personal" ? "Personal credential limit reached (5 active)" :
+				"Organization credential limit reached (100 active)",
 		)
 	return { id, secret, expiresAt }
 }
@@ -213,9 +231,10 @@ export async function listCredentials(
 	const result = await env.DB.prepare(
 		`SELECT id, label, kind, user_id AS issuerId, grants, created_at AS createdAt,
 		expires_at AS expiresAt, revoked_at AS revokedAt FROM external_credential WHERE org_id = ?
-		AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1)) ORDER BY created_at DESC LIMIT 100`,
+		AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))
+		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind = 'personal') DESC, created_at DESC LIMIT 300`,
 	)
-		.bind(orgId, userId, Number(admin))
+		.bind(orgId, userId, Number(admin), Date.now())
 		.all<{
 			id: string
 			label: string

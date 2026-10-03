@@ -4,7 +4,8 @@ The existing Worker exposes MCP and equivalent HTTP operations through one servi
 An employee can authorize their primary bot to recall shared knowledge and maintain
 their own personal memory without a separate Slack conversation. MCP does not observe
 conversations: the primary bot must invoke these tools. Automatic capture is not
-guaranteed for arbitrary clients.
+guaranteed for arbitrary clients. This PR implements gateway capabilities, not a
+complete autonomous primary-bot integration (see the readiness table below).
 
 ## Credentials and consent
 
@@ -68,7 +69,7 @@ separate work: confirm that requirement before expanding authentication scope.
 | --- | --- | --- |
 | `sudopedia_search_memory` | POST `/brain/external/v1/memory/search` | `{query, limit?, topicTags?}` → `{results, truncated}`. |
 | `sudopedia_capture_memory` | POST `/brain/external/v1/memory/capture` | `{idempotencyKey, content, eventDate?}` → receipt. |
-| `sudopedia_correct_memory` | POST `/brain/external/v1/memory/correct` | `{idempotencyKey, reference, content, eventDate?}` → receipt. Complete replacement, not a patch. |
+| `sudopedia_correct_memory` | POST `/brain/external/v1/memory/correct` | `{idempotencyKey, reference, content, eventDate?, retention?}` → receipt. Complete replacement, not a patch. `retention` is `durable` (default) or `preserve`. |
 | `sudopedia_retract_memory` | POST `/brain/external/v1/memory/retract` | `{idempotencyKey, reference}` → receipt. Single-memory soft retraction. |
 | `sudopedia_memory_write_status` | POST `/brain/external/v1/memory/status` | `{idempotencyKey}` → owner's receipt; never redispatches. |
 | `sudopedia_list_skills` | GET `/brain/external/v1/skills` | Active organization skill index, no bodies. |
@@ -134,12 +135,26 @@ installed Supermemory 4.25.4 SDK:
   supersedes the old entry (`isLatest=false`). Reinforcement uses this operation too.
   Existing metadata from the verified owner-scoped entry (including tags, sources,
   and event dates) is retained, with integration provenance refreshed and an
-  explicitly supplied event date taking precedence.
+  explicitly supplied event date taking precedence. The default durable correction
+  explicitly clears an inherited `forgetAfter` horizon; `retention: "preserve"`
+  intentionally keeps a still-transient fact's existing horizon. Capture also
+  explicitly requests no expiry. Responses must confirm the durable horizon was
+  cleared before the gateway reports applied.
 - Retraction uses `memories.forget` (`DELETE /v4/memories`): soft-forgotten entries
   leave memory search. This is not permanent erasure.
 - These operations do **not** modify/delete original source documents. Document
   content updates trigger reprocessing; metadata-only changes do not reindex.
   Existing Slack document ingestion remains asynchronous and unchanged.
+
+First-time capture checks the owner container's settings. A 404 provisions it via
+the documented document-ingestion API, using a stable owner/org-derived custom ID,
+static infrastructure text and `taskType: "superrag"` (no fact extraction/profile
+updates). It does not PATCH nonexistent settings or ingest conversation text.
+Settings are checked again before memory search/CRUD; accepted-but-not-yet-created
+containers fail preflight safely, allowing a later intent to reuse the same bootstrap.
+This follows the published [ingestion](https://supermemory.ai/docs/ingestion/add-memories)
+and [container](https://supermemory.ai/docs/concepts/container-tags) contracts;
+first-time live-provider behavior still needs approved validation.
 
 Ownership/freshness are reverified with the supported owner-container
 `/v4/memories/list`, capped at three pages of 100 latest entries. Missing, changed,
@@ -149,17 +164,60 @@ preview/forget workflow instead.
 
 A durable atomic D1 journal serializes gateway writes per owner across credentials
 and dispatches each idempotent intent at most once. A bounded pre-capture personal
-search suppresses exact live-content duplicates. Semantic synonyms/contradictions
-require the bot's search/matching decision; the gateway runs no additional LLM.
+search of at most 20 matches suppresses exact live-content duplicates within that
+window. Matches are reverified through owner-scoped listing: permanent repeats are
+no-ops, while expiring live repeats are versioned with expiry cleared and metadata
+preserved. This is not semantic matching or an unbounded uniqueness guarantee.
+Semantic synonyms/contradictions require the bot's search/matching decision; the
+gateway runs no additional LLM.
 
 The provider documents neither idempotency tokens nor atomic compare-and-swap.
-Ambiguous writes are never automatically retried, including after a crash. Pending/
-unknown blocks further gateway writes for that owner; reads continue. Status does
-not guess completion. An operator must reconcile the non-secret operation ID
-against provider `external_operation` metadata and verify target version/forgotten
-state before marking the journal row applied/rejected. Do not clear rows or submit
-new keys merely because a search returns no result. No automatic reconciliation,
-background job or unsafe lock-expiry redispatch is implemented.
+Ambiguous writes are never automatically retried, including after a crash. New
+journal rows begin in `preflight`, with an eight-second dispatch deadline. Status
+or a subsequent claim rejects expired preflight rows; an atomic phase transition
+fences old/paused workers from dispatching. Immediately before the actual memory
+mutation, the journal persists `dispatched`, action, target ID/fingerprint and
+dispatch time. Provisioning and search are still preflight, not memory dispatch.
+Dispatched pending/unknown rows never expire automatically and block later owner
+writes; reads continue. Provider success followed by receipt-persistence failure
+is not reported as applied and is never redispatched. A persistent journal failure
+returns sanitized 503 with instructions to check status. Legacy unresolved rows
+default conservatively to dispatched and are not auto-released.
+
+### Operator reconciliation (no employee/admin endpoint)
+
+`src/external/reconciliation.ts` supplies an exact-snapshot compare-and-swap helper;
+`scripts/reconcile-personal.ts` generates the same guarded SQL for manual review.
+Neither automatically verifies the provider or redispatches anything. Operators
+need separately authorized D1/provider access, not an employee bearer credential.
+
+1. Inspect the non-content journal row for the exact org/owner/operation. Wait beyond
+   its dispatch deadline, and establish that the original request has terminated
+   and cannot later send a mutation. A deadline alone is not proof of termination.
+2. For dispatched rows, independently verify the owner-scoped target/version and
+   `external_operation` metadata (capture/correction), or the exact forgotten target
+   and `forgetReason` containing `external_operation=<journal id>` (retraction).
+   Require authoritative evidence of applied or not applied. Missing semantic search
+   results, stale replicas or simply finding an old version are not rejection proof.
+   If evidence is inconclusive, leave the lock unresolved. For preflight, only
+   rejection is permitted.
+3. Prepare a non-secret snapshot JSON with `id`, `orgId`, `userId`, `requestHash`,
+   `phase`, `providerAction`, `providerId`, `targetFingerprint` copied verbatim from
+   the row; add `outcome: "applied" | "rejected"`, `originalRequestStopped: true`
+   and `providerVerified: true` only after those checks. Keep the verification
+   evidence in the restricted incident record, not employee logs or this JSON.
+4. Generate, inspect and apply SQL only with explicit operator authorization:
+   `bun scripts/reconcile-personal.ts verified-snapshot.json > reconciliation.sql`.
+   The command only prints SQL; it makes no database/provider calls. Use the normal
+   approved D1 console/CLI against the verified database. A returned row confirms
+   reconciliation; zero rows means the snapshot is stale/ineligible/already final.
+   Recheck status before asking the employee to resume. Do not clear/delete journal
+   rows or resubmit uncertain writes with a new key.
+
+The CAS records reconciliation time and prevents late receipt overwrite. Migrated
+legacy rows lack the required target/deadline evidence and cannot use this helper;
+they require a separate incident-specific recovery decision, never guessed expiry.
+There is no automatic reconciliation, background job or public impersonation API.
 
 Concurrent Slack/provider-side writers are outside the gateway's serialization.
 Freshness checks catch prior changes but cannot eliminate a check-to-write race.
@@ -210,6 +268,23 @@ by `bun run test:external-runtime`. It demonstrates save → later recall → ch
 later changed recall through SDK/HTTP. It scripts explicit tool calls; it does not
 claim an arbitrary model/client will automatically maintain memory.
 
+### Gateway versus complete product readiness
+
+| Required behavior | Production enforcement and evidence | Remaining client/product work |
+| --- | --- | --- |
+| Authorize bot; isolate shared and own personal memory | Separate grants, consent, live membership, strict inputs, one-time secrets; unit and real-Worker fictional A/B tests | Verify intended client's bearer authentication and real browser-to-gateway setup. OAuth is not implemented. |
+| Search before saving; recognize useful durable facts | Capture performs bounded exact-text search; direct durable CRUD is implemented | Model recognition, semantic matching and search-before-correction are instructions, not server-enforced conversation behavior. |
+| Correct changed facts; retract specifically wrong facts | Owner-scoped freshness check, superseding version, metadata preservation, expiry policy, soft forgetting; fictional provider and SDK-wire tests | Model must select the right reference/replacement; external writers remain outside gateway serialization. |
+| Respect “do not remember”; avoid secrets/transcripts | Size/strict-schema bounds only; tool descriptions are guidance | Trusted client policy, opt-out handling, sensitive-content controls and adversarial model evaluations are not implemented here. |
+| Retrieve in later conversations | Scoped retrieval endpoints; scripted later-call recall/change loop | Actual cross-conversation client invocation/context use is not implemented or verified. |
+| Honestly confirm outcomes | Applied/pending/unknown/rejected receipts, status and durable locks; journal failure tests | Employee-facing model/UI confirmation must follow receipts; scripted calls do not establish this behavior. |
+
+Completion requires a named primary-bot adapter, trusted maintenance policy,
+per-employee secret lifecycle, persistent intent keys across conversations/retries,
+employee-visible confirmation/recovery, and real-client/model evaluations of the
+entire authorization → recall → capture → changed recall → retraction journey.
+Those integrations are separate work; successful endpoints are not proof of them.
+
 ## Limits and verification
 
 `EXTERNAL_WRITE_DAILY_QUOTA` defaults to 50 combined capture/correct/retract
@@ -217,14 +292,22 @@ attempts per credential/day (configurable 1–10,000). Retries consume quota. Se
 defaults to 100/day; each skill/status operation to 1,000/day. Atomic D1 counters
 enforce daily budgets. Worker bursts remain 60 requests/minute per credential/location;
 management 10/minute per actor/org/location. Provider calls are bounded to two/search,
-four/capture including optional first-space provisioning, and four/correct or retract.
+eight/capture including optional first-space provisioning and scoped repeat
+verification, and four/correct or retract. Normal new-fact capture uses three calls;
+first-time capture uses five.
 No provider retries; one 8-second cancellation/deadline spans provider work. No
 model/extraction calls for direct writes.
 
 Envelopes: 64 KiB; structured results: 28 KiB. References: 1,000/owner, expire/sweep
 after 24 hours. Journal: 10,000 intents/owner, retained for retry safety. Capacity
 fails closed and requires an explicit retention decision, not silent journal deletion.
-Credentials remain capped at 100/org; inactive history older than 30 days is swept.
+Credentials are capped at five active personal credentials per employee and 100
+active organization integrations, independently. Revoked/expired rows do not spend
+active capacity. History is bounded to 100 rows/employee and 200 organization rows;
+older inactive rows are swept after 30 days or evicted sooner to reserve capacity.
+Personal cleanup never evicts another employee's history.
+Management listing returns up to 300 rows (both bounded history buckets), so an
+admin's personal credentials cannot hide active organization credentials.
 Audits contain IDs, grants, operation, status, count and duration only—no queries,
 memory content, secrets or raw errors. The journal holds hashes/receipts, not transcripts.
 
@@ -242,7 +325,12 @@ The separate local fixture uses real workerd with ephemeral isolated D1/SQLite D
 fictional shared/A/B/private-channel data and deterministic mocked provider CRUD.
 It checks workflow, isolation, MCP/HTTP parity, concurrent/stale writes, pending/
 unknown receipts, management, auth, quotas and transport protections.
-`provider.test.ts` verifies actual adapter requests with mocked public API responses.
+`provider.test.ts` verifies adapter requests with mocked public API responses;
+`provider-wire.test.ts` additionally runs the installed SDK through fictional fetch
+responses. `durability.test.ts` executes production SQL against local SQLite,
+including credential capacity, journal/reference bounds, fencing, receipt failures
+and the operator SQL generator. Three additional real-Worker groups cover preflight
+recovery, identifiable ambiguous retraction and exact-snapshot reconciliation.
 Neither demonstrates live-provider consistency or managed-client compatibility.
 For fake-data browser verification, build web and start `scripts/preview-external.ts`.
 Fixture endpoints are never mounted by the production Worker.
@@ -260,7 +348,7 @@ The full test suite currently passes, including the QuickJS and MCP catalog suit
 that were previously noted as baseline loader failures. No security/type checks
 were relaxed to hide unrelated failures.
 
-Final local record: 118 tests passed (32 focused external tests), 18 real-workerd
+Final local record: 150 tests passed (64 focused external tests), 21 real-workerd
 verification groups passed, TypeScript and web checks passed, and the Worker/web
 dry-run build passed. Two earlier fixture runs hit a startup timeout; diagnostic
 reruns completed successfully without increasing or removing the gateway's timeout.
@@ -268,8 +356,8 @@ The mounted-browser component check above used mocked auth/fetch, not a live pro
 
 ## Migration/deployment handoff (not performed)
 
-Include `drizzle/0002_brown_kid_colt.sql`, `0003_nervous_frog_thor.sql` (owner indexes)
-and the bundled migrations; existing boot
+Include `drizzle/0002_brown_kid_colt.sql`, `0003_nervous_frog_thor.sql` (owner indexes),
+`0004_mushy_maria_hill.sql` (dispatch/reconciliation journal) and bundled migrations; existing boot
 migration applies them. Keep canonical `EXTERNAL_PUBLIC_URL`, supported rate-limit
 bindings and Supermemory secret. Optionally configure the write quota.
 

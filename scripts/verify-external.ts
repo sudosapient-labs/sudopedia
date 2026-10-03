@@ -3,6 +3,7 @@ import { unstable_dev } from "wrangler"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { verifyPersonal } from "./verify-personal.ts"
+import { verifyDurability } from "./verify-durability.ts"
 
 // Isolated, ephemeral local workerd + D1 + SQLite DO. No remote bindings/providers.
 const worker = await unstable_dev("test/external/worker.ts", {
@@ -69,6 +70,7 @@ try {
 		"X-Sudopedia-CSRF": "1",
 	}
 	checks += await verifyPersonal(origin, connect)
+	checks += await verifyDurability(origin)
 	await post("/fixture/change", { action: "quota_reset" })
 	const mint = async (grants: string[]) => {
 		const result = await post(

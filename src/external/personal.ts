@@ -16,6 +16,12 @@ export type WriteResult = {
 	idempotencyKey: string
 	searchable: boolean
 }
+export type Mutation = "capture" | "correct" | "retract"
+export type Dispatch = {
+	action: Mutation
+	providerId?: string
+	fingerprint?: string
+}
 export type PersonalProvider = {
 	// Always a scoped, bounded latest-entry lookup. No unscoped get-by-ID.
 	find: (
@@ -33,7 +39,7 @@ export type PersonalProvider = {
 		context: {
 			current?: PersonalEntry
 			// Call immediately before dispatching a memory mutation, not preflight reads.
-			onDispatch: () => void
+			onDispatch: (dispatch: Dispatch) => Promise<void>
 		},
 	) => Promise<{ status: "applied" | "pending" }>
 }
@@ -43,13 +49,22 @@ export type Journal = {
 	state: string
 	result: string | null
 }
+export type Intent = {
+	operation: Mutation
+	providerId?: string
+	fingerprint?: string
+}
 export type PersonalStore = {
 	reference: (owner: Principal, entry: PersonalEntry) => Promise<string>
 	lookup: (owner: Principal, reference: string) => Promise<Reference | null>
 	read: (id: string) => Promise<Journal | null>
-	claim: (owner: Principal, id: string, hash: string) => Promise<boolean>
+	claim: (owner: Principal, id: string, hash: string, intent: Intent) => Promise<boolean>
+	dispatch: (id: string, dispatch: Dispatch) => Promise<void>
 	finish: (id: string, result: WriteResult) => Promise<void>
 }
+// A preflight worker cannot dispatch after this deadline, including after a crash
+// or a delayed DB response. The atomic dispatch transition fences expired claims.
+export const PREFLIGHT_MS = 8000
 export const fingerprint = (entry: PersonalEntry) =>
 	hashSecret(JSON.stringify([entry.id, entry.memory, entry.updatedAt]))
 export const operationId = (owner: Principal, key: string) =>
@@ -100,17 +115,31 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 			)
 				.bind(ref, owner.orgId, owner.userId, Date.now() - 86400000)
 				.first<Reference>(),
-		read: (id) =>
-			env.DB.prepare(
+		async read(id) {
+			await env.DB.prepare(
+				`UPDATE external_memory_operation SET state = 'rejected', result =
+				'{"status":"rejected","searchable":false}'
+				WHERE id = ? AND state = 'pending' AND phase = 'preflight' AND deadline_at <= ?`,
+			).bind(id, Date.now()).run()
+			return env.DB.prepare(
 				"SELECT request_hash, state, result FROM external_memory_operation WHERE id = ?",
 			)
 				.bind(id)
-				.first<Journal>(),
-		async claim(owner, id, hash) {
+				.first<Journal>()
+		},
+		async claim(owner, id, hash, intent) {
+			const now = Date.now()
+			await env.DB.prepare(
+				`UPDATE external_memory_operation SET state = 'rejected', result =
+				'{"status":"rejected","searchable":false}'
+				WHERE org_id = ? AND user_id = ? AND state = 'pending'
+				AND phase = 'preflight' AND deadline_at <= ?`,
+			).bind(owner.orgId, owner.userId, now).run()
 			const row = await env.DB.prepare(
 				`INSERT OR IGNORE INTO external_memory_operation
-				(id, org_id, user_id, request_hash, state, created_at)
-				SELECT ?, ?, ?, ?, 'pending', ? WHERE
+					(id, org_id, user_id, request_hash, state, created_at,
+					operation, phase, provider_id, target_fingerprint, deadline_at)
+					SELECT ?, ?, ?, ?, 'pending', ?, ?, 'preflight', ?, ?, ? WHERE
 				NOT EXISTS (SELECT 1 FROM external_memory_operation WHERE org_id = ? AND user_id = ? AND state IN ('pending', 'unknown'))
 				AND (SELECT COUNT(*) FROM external_memory_operation WHERE org_id = ? AND user_id = ?) < 10000 RETURNING id`,
 			)
@@ -119,7 +148,11 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 					owner.orgId,
 					owner.userId,
 					hash,
-					Date.now(),
+						now,
+						intent.operation,
+						intent.providerId ?? null,
+						intent.fingerprint ?? null,
+						now + PREFLIGHT_MS,
 					owner.orgId,
 					owner.userId,
 					owner.orgId,
@@ -128,12 +161,29 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 				.first()
 			return Boolean(row)
 		},
+		async dispatch(id, dispatch) {
+			const now = Date.now()
+			const row = await env.DB.prepare(
+				`UPDATE external_memory_operation SET phase = 'dispatched',
+				provider_action = ?, provider_id = ?, target_fingerprint = ?, dispatched_at = ?
+				WHERE id = ? AND state = 'pending' AND phase = 'preflight'
+				AND deadline_at > ? RETURNING id`,
+			).bind(dispatch.action, dispatch.providerId ?? null,
+				dispatch.fingerprint ?? null, now, id, now).first()
+			if (!row) throw new ExternalError("write_conflict", 409,
+				"Personal write preflight expired; check status before a new intent")
+		},
 		async finish(id, result) {
-			await env.DB.prepare(
-				"UPDATE external_memory_operation SET state = ?, result = ? WHERE id = ?",
+			const row = await env.DB.prepare(
+					"UPDATE external_memory_operation SET state = ?, result = ? WHERE id = ? AND state IN ('pending', 'unknown') AND reconciled_at IS NULL RETURNING id",
 			)
 				.bind(result.status, JSON.stringify(result), id)
-				.run()
+					.first()
+			if (!row) {
+				const prior = await this.read(id)
+				if (result.status === "rejected" && prior?.state === "rejected") return
+				throw new ExternalError("write_conflict", 409, "Write receipt already finalized; check status")
+			}
 		},
 	}
 }
@@ -179,7 +229,11 @@ export async function maintainPersonal(
 				"Personal memory reference unavailable; search again",
 			)
 	}
-	if (!(await store.claim(owner, id, hash))) {
+	if (!(await store.claim(owner, id, hash, {
+		operation,
+		providerId: reference?.provider_id,
+		fingerprint: reference?.fingerprint,
+	}))) {
 		const raced = await store.read(id)
 		if (raced) return replay(raced)
 		throw new ExternalError(
@@ -218,7 +272,9 @@ export async function maintainPersonal(
 			signal,
 			{
 				current,
-				onDispatch: () => {
+				onDispatch: async (dispatch) => {
+					signal.throwIfAborted()
+					await store.dispatch(id, dispatch)
 					signal.throwIfAborted()
 					dispatched = true
 				},
@@ -234,11 +290,18 @@ export async function maintainPersonal(
 	} catch (error) {
 		// No automatic redispatch after timeout, provider failure, malformed response,
 		// or a crash between provider success and journal commit.
-		await store.finish(id, {
-			status: dispatched ? "unknown" : "rejected",
-			idempotencyKey: input.idempotencyKey,
-			searchable: false,
-		})
+		try {
+			await store.finish(id, {
+				status: dispatched ? "unknown" : "rejected",
+				idempotencyKey: input.idempotencyKey,
+				searchable: false,
+			})
+		} catch {
+			// A failed journal write leaves the durable phase intact. Never disguise
+			// potentially applied mutations as ordinary failures or redispatch them.
+			throw new ExternalError("journal_unavailable", 503,
+				"Write receipt unavailable; check status and do not submit a new key")
+		}
 		if (error instanceof ExternalError) throw error
 		throw new ExternalError(
 			signal.aborted ? "upstream_timeout" : "upstream_failure",

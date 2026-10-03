@@ -2,14 +2,17 @@ import { getAgentByName } from "agents"
 import type { CompanyBrainAgent } from "../brain/turn/agent"
 import { memoryClient } from "../memory/client"
 import { authenticate, consumeQuota } from "./credentials"
+import { hashSecret } from "./credentials"
 import { boundedSetting } from "./limits"
 import type { ExternalDependencies } from "./service"
 import type { SearchInput } from "./contracts"
 import {
 	personalStore,
+	fingerprint,
 	type PersonalEntry,
 	type PersonalProvider,
 } from "./personal"
+import { ExternalError } from "./errors"
 
 /** Only this server-built request reaches the provider; no caller container/filter pass-through. */
 export function sharedSearchRequest(input: SearchInput, threshold = 0.3) {
@@ -44,6 +47,41 @@ export function sharedSearchRequest(input: SearchInput, threshold = 0.3) {
 
 export const personalContainer = (userId: string) => `user_${userId}`
 
+// The documented document-ingestion API creates missing containers. SuperRAG
+// skips fact extraction/profile updates; this static bootstrap contains no facts,
+// secrets or conversation text. A stable custom ID bounds retries to one document.
+export const PERSONAL_BOOTSTRAP =
+	"Private memory container bootstrap. This is infrastructure, not an employee fact."
+
+async function ensurePersonalContainer(
+	env: Env,
+	owner: Parameters<PersonalProvider["find"]>[0],
+	signal: AbortSignal,
+) {
+	const client = memoryClient(env)
+	const containerTag = personalContainer(owner.userId)
+	const path = `/v3/container-tags/${encodeURIComponent(containerTag)}`
+	const options = { signal, timeout: 8000, maxRetries: 0 }
+	try {
+		await client.get(path, options)
+		return
+	} catch (error) {
+		if ((error as { status?: number }).status !== 404) throw error
+	}
+	const digest = await hashSecret(JSON.stringify([owner.orgId, owner.userId]))
+	const response = await client.add({
+		content: PERSONAL_BOOTSTRAP,
+		customId: `sd_personal_bootstrap_${digest}`,
+		containerTag,
+		taskType: "superrag",
+		metadata: { memory_scope: "personal", source_type: "external-container-bootstrap" },
+	}, options)
+	if (!response.id) throw new Error("Invalid bootstrap result")
+	// Acceptance is not proof of provisioning. Fail preflight if not yet available;
+	// a later intent can safely reuse the identical SuperRAG bootstrap custom ID.
+	await client.get(path, options)
+}
+
 /** Public provider v4 CRUD, verified against its OpenAPI, not document updates. */
 export function personalProvider(env: Env): PersonalProvider {
 	return {
@@ -75,8 +113,8 @@ export function personalProvider(env: Env): PersonalProvider {
 			const client = memoryClient(env)
 			const options = { signal, timeout: 8000, maxRetries: 0 }
 			const containerTag = personalContainer(owner.userId)
-			const metadata = {
-				...(operation === "correct" ? context.current?.metadata : {}),
+			const metadataFor = (entry?: PersonalEntry) => ({
+				...entry?.metadata,
 				memory_scope: "personal",
 				source_type: "external-primary-bot",
 				external_integration: owner.credentialId,
@@ -85,14 +123,29 @@ export function personalProvider(env: Env): PersonalProvider {
 				...("eventDate" in input && input.eventDate
 					? { event_date: input.eventDate }
 					: {}),
+			})
+			const update = async (entry: PersonalEntry, preserveExpiry = false) => {
+				await context.onDispatch({ action: "correct", providerId: entry.id,
+					fingerprint: await fingerprint(entry) })
+				const response = await client.memories.updateMemory({
+					id: entry.id,
+					containerTag,
+					newContent: (input as { content: string }).content,
+					metadata: metadataFor(entry),
+					...(!preserveExpiry ? { forgetAfter: null } : {}),
+				}, options)
+				if (!response.id || response.parentMemoryId !== entry.id ||
+					(!preserveExpiry && response.forgetAfter !== null))
+					throw new Error("Invalid provider result")
 			}
 			if (operation === "retract") {
-				context.onDispatch()
+				await context.onDispatch({ action: "retract", providerId: id,
+					fingerprint: context.current ? await fingerprint(context.current) : undefined })
 				const response = await client.memories.forget(
 					{
 						id,
 						containerTag,
-						reason: "Employee retraction through external integration",
+						reason: `Employee retraction; external_operation=${operationId}`,
 					},
 					options,
 				)
@@ -101,40 +154,10 @@ export function personalProvider(env: Env): PersonalProvider {
 			} else if (operation === "correct") {
 				if (!context.current || context.current.id !== id)
 					throw new Error("Verified personal memory required")
-				context.onDispatch()
-				const response = await client.memories.updateMemory(
-					{
-						id,
-						containerTag,
-						newContent: (input as { content: string }).content,
-						metadata,
-					},
-					options,
-				)
-				if (!response.id || response.parentMemoryId !== id)
-					throw new Error("Invalid provider result")
+				await update(context.current, (input as { retention?: string }).retention === "preserve")
 			} else {
 				const content = (input as { content: string }).content
-				// Provision before search: a first-time employee may not have a space yet.
-				try {
-					await client.get(
-						`/v3/container-tags/${encodeURIComponent(containerTag)}`,
-						options,
-					)
-				} catch (error) {
-					if ((error as { status?: number }).status !== 404) throw error
-					await client.patch(
-						`/v3/container-tags/${encodeURIComponent(containerTag)}`,
-						{
-							...options,
-							body: {
-								name: "My Brain",
-								entityContext:
-									"Employee-specific private knowledge from explicitly authorized conversations.",
-							},
-						},
-					)
-				}
+				await ensurePersonalContainer(env, owner, signal)
 				const existing = await client.search.memories(
 					{
 						q: content,
@@ -153,9 +176,20 @@ export function personalProvider(env: Env): PersonalProvider {
 					},
 					options,
 				)
-				if (existing.results.some((row) => row.memory?.trim() === content))
+				const match = existing.results.find((row) => row.memory?.trim() === content)
+				if (match) {
+					// Search omits expiry state. Reverify the full owner-scoped snapshot
+					// before promoting an expiring repeat; never use an unscoped ID fetch.
+					const current = await this.find(owner, match.id, signal)
+					if (!current || current.isLatest === false || current.isForgotten ||
+						current.memory.trim() !== content ||
+						(current.forgetAfter && Date.parse(current.forgetAfter) <= Date.now()))
+						throw new ExternalError("stale_reference", 409,
+							"Matching personal memory changed or is unavailable; search again")
+					if (current.forgetAfter) await update(current)
 					return { status: "applied" }
-				context.onDispatch()
+				}
+				await context.onDispatch({ action: "capture" })
 				const response = await client.post<{ memories: Array<{ id: string }> }>(
 					"/v4/memories",
 					{
@@ -166,13 +200,15 @@ export function personalProvider(env: Env): PersonalProvider {
 								{
 									content: (input as { content: string }).content,
 									isStatic: false,
-									metadata,
+									forgetAfter: null,
+									metadata: metadataFor(),
 								},
 							],
 						},
 					},
 				)
-				if (response.memories?.length !== 1 || !response.memories[0]?.id)
+				if (response.memories?.length !== 1 || !response.memories[0]?.id ||
+					(response.memories[0] as { forgetAfter?: string | null }).forgetAfter !== null)
 					throw new Error("Invalid provider result")
 			}
 			return { status: "applied" }

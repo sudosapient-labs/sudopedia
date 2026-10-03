@@ -17,6 +17,8 @@ import {
 import type { CompanyBrainAgent } from "../../src/brain/turn/agent"
 import type { AppContext } from "../../src/types"
 import { personalStore } from "../../src/external/personal"
+import { reconcilePersonalOperation } from "../../src/external/reconciliation"
+import { publicError } from "../../src/external/errors"
 import {
 	fakePersonalProvider,
 	fakePersonalSearch,
@@ -107,6 +109,7 @@ const app = new Hono<AppContext>({ strict: false })
 let migrated: Promise<unknown> | undefined
 let providerCalls = 0
 let lastProviderRequest: unknown
+let journalFailures = 0
 app.use("*", async (c, next) => {
 	await (migrated ??= applyMigrations(c.env))
 	await next()
@@ -147,6 +150,12 @@ app.post("/fixture/session/:actor", async (c) => {
 })
 app.post("/fixture/change", async (c) => {
 	const { action, id, grants } = await c.req.json()
+	if (action === "expire_preflight")
+		await c.env.DB.prepare("UPDATE external_memory_operation SET deadline_at=1 WHERE id=?").bind(id).run()
+	if (action === "claim_preflight")
+		await personalStore(c.env).claim({ orgId: "org", userId: "delegate", credentialId: "fixture", grants: [] },
+			id, "fixture-hash", { operation: "capture" })
+	if (action === "journal_failure") journalFailures = 1
 	if (action === "stale_personal") {
 		const row = personalRows.find((r) => r.id === id)
 		if (row) {
@@ -190,6 +199,18 @@ app.post("/fixture/change", async (c) => {
 		).oversizedBody(id)
 	return c.json({ ok: true })
 })
+app.get("/fixture/journal/:id", async (c) => c.json(await c.env.DB.prepare(
+	"SELECT * FROM external_memory_operation WHERE id=?",
+).bind(c.req.param("id")).first()))
+app.post("/fixture/reconcile", async (c) => {
+	try {
+		await reconcilePersonalOperation(c.env, await c.req.json())
+		return c.json({ ok: true })
+	} catch (error) {
+		const safe = publicError(error)
+		return c.json({ error: safe.code }, safe.status)
+	}
+})
 app.post("/fixture/rate-limit", async (c) => {
 	const key = crypto.randomUUID()
 	let rejected = 0
@@ -220,7 +241,13 @@ app.get("/auth/session", (c) =>
 const routes = createExternalRoutes((env, request) => ({
 	authenticate: () => authenticate(env, request),
 	quota: (principal, operation) => consumeQuota(env, principal, operation),
-	personalStore: personalStore(env),
+	personalStore: {
+		...personalStore(env),
+		async finish(id, result) {
+			if (journalFailures > 0) { journalFailures--; throw new Error("Fictional journal failure") }
+			await personalStore(env).finish(id, result)
+		},
+	},
 	personalProvider: fakePersonalProvider,
 	personalSearch: (input, owner) => fakePersonalSearch(input, owner),
 	search: async (input) => {

@@ -50,6 +50,8 @@ export const correctSchema = z.strictObject({
 	idempotencyKey: requestId,
 	reference: z.string().uuid(),
 	content: durableContent,
+	// Durable facts are promoted; explicitly preserve a transient fact's horizon.
+	retention: z.enum(["durable", "preserve"]).optional(),
 	...provenance,
 })
 export const retractSchema = z.strictObject({
@@ -57,7 +59,10 @@ export const retractSchema = z.strictObject({
 	reference: z.string().uuid(),
 })
 export const statusSchema = z.strictObject({ idempotencyKey: requestId })
-export type WriteInput = z.infer<typeof captureSchema> & { reference?: string }
+export type WriteInput = z.infer<typeof captureSchema> & {
+	reference?: string
+	retention?: "durable" | "preserve"
+}
 export type RetractInput = z.infer<typeof retractSchema>
 export const mintSchema = z.strictObject({
 	label: z.string().trim().min(1).max(100),

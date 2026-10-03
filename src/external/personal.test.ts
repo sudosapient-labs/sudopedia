@@ -42,6 +42,7 @@ function fixture() {
 		},
 	]
 	const store: PersonalStore = {
+		dispatch: vi.fn(async () => {}),
 		async reference(owner, entry) {
 			const id = key()
 			refs.set(id, {
@@ -89,7 +90,7 @@ function fixture() {
 		),
 		mutate: vi.fn(
 			async (owner, operation, input, id, _operationId, _signal, context) => {
-				context.onDispatch()
+				await context.onDispatch({ action: operation, providerId: id })
 				const old = entries.find((r) => r.owner === owner.userId && r.id === id)
 				if (operation === "retract") old!.isForgotten = true
 				else {
@@ -200,7 +201,7 @@ describe("personal memory maintenance", () => {
 			input = { idempotencyKey: key(), content: "Durable fact" }
 		f.provider.mutate = vi.fn(
 			async (_p, _op, _input, _id, _operationId, _signal, context) => {
-				context.onDispatch()
+				await context.onDispatch({ action: "capture" })
 				throw new Error("secret/content must not leak")
 			},
 		)
@@ -223,7 +224,7 @@ describe("personal memory maintenance", () => {
 			input = { idempotencyKey: key(), content: "Preference" }
 		f.provider.mutate = vi.fn(
 			async (_p, _op, _input, _id, _operationId, _signal, context) => {
-				context.onDispatch()
+				await context.onDispatch({ action: "capture" })
 				return { status: "pending" as const }
 			},
 		)
@@ -243,7 +244,7 @@ describe("personal memory maintenance", () => {
 			input = { idempotencyKey: key(), content: "Preference" }
 		f.provider.mutate = vi.fn(
 			async (_p, _op, _input, _id, _operationId, signal, context) => {
-				context.onDispatch()
+				await context.onDispatch({ action: "capture" })
 				abort.abort()
 				signal.throwIfAborted()
 				return { status: "applied" as const }
@@ -315,7 +316,7 @@ describe("personal memory maintenance", () => {
 			context,
 		) => {
 			abort.abort()
-			context.onDispatch()
+			await context.onDispatch({ action: "capture" })
 			mutation()
 			return { status: "applied" }
 		}

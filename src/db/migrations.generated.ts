@@ -57,5 +57,18 @@ export const MIGRATIONS: ReadonlyArray<{
 			"CREATE INDEX `external_memory_operation_owner` ON `external_memory_operation` (`org_id`,`user_id`,`state`);",
 			"CREATE INDEX `external_memory_reference_owner` ON `external_memory_reference` (`org_id`,`user_id`,`created_at`);"
 		]
+	},
+	{
+		"name": "0004_mushy_maria_hill.sql",
+		"statements": [
+			"ALTER TABLE `external_memory_operation` ADD `operation` text DEFAULT 'legacy' NOT NULL;",
+			"ALTER TABLE `external_memory_operation` ADD `phase` text DEFAULT 'dispatched' NOT NULL;",
+			"ALTER TABLE `external_memory_operation` ADD `provider_action` text;",
+			"ALTER TABLE `external_memory_operation` ADD `provider_id` text;",
+			"ALTER TABLE `external_memory_operation` ADD `target_fingerprint` text;",
+			"ALTER TABLE `external_memory_operation` ADD `deadline_at` integer;",
+			"ALTER TABLE `external_memory_operation` ADD `dispatched_at` integer;",
+			"ALTER TABLE `external_memory_operation` ADD `reconciled_at` integer;"
+		]
 	}
 ]
