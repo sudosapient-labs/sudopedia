@@ -26,6 +26,7 @@ const credentials: Array<{
 	expiresAt: number
 	revokedAt: number | null
 }> = []
+let nextCredentialId = 0
 fixture.fetch = async (input, init) => {
 	const path = String(input)
 	const body = init?.body ? JSON.parse(String(init.body)) : undefined
@@ -35,13 +36,13 @@ fixture.fetch = async (input, init) => {
 		if (credential) credential.revokedAt = Date.now()
 		return Response.json({ ok: true })
 	}
-	if (init?.method === "POST") {
+	if (init?.method === "POST" && !path.endsWith("/list")) {
 		if (!body.consent)
 			return Response.json(
 				{ error: { message: "Consent required" } },
 				{ status: 400 },
 			)
-		const id = crypto.randomUUID()
+		const id = `00000000-0000-4000-8000-${String(++nextCredentialId).padStart(12, "0")}`
 		credentials.push({
 			id,
 			label: body.label,
@@ -59,8 +60,11 @@ fixture.fetch = async (input, init) => {
 			{ status: 201 },
 		)
 	}
+	const start = body?.cursor ? credentials.findIndex((c) => c.id === body.cursor.id) + 1 : 0
+	const page = credentials.slice(start, start + 2)
 	return Response.json({
-		credentials,
+		credentials: page,
+		nextCursor: start + page.length < credentials.length ? { id: page.at(-1)!.id, asOf: Date.now(), version: "a".repeat(64) } : null,
 		mcpUrl: "https://fictional.invalid/mcp",
 		maxLifetimeDays: 30,
 	})

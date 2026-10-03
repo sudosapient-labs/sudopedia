@@ -86,7 +86,13 @@ and byte budget. Each result has `scope: "shared" | "personal"`, `editable` and 
 optional `reference`. Shared results never have edit references. Personal provider
 IDs are opaque; shared IDs retain the old typed memory/chunk shape. Personal
 search uses memories mode; shared hybrid search is unchanged. Only memory entries
-with usable snapshot timestamps are editable.
+with usable snapshot timestamps and an allocated reference are editable. Read-only
+searches allocate no database references. Write-capable searches allocate only for
+the final selected results: one expiry sweep, up to 20 atomic inserts, and one
+verification query (at most 22 reference statements, below Free D1's 50-query
+invocation limit including authentication/quota). At reference capacity, new results
+remain readable with `editable: false` and no `reference`; existing unexpired
+references stay editable. Database errors are not disguised as capacity exhaustion.
 
 References are UUIDs bound server-side to org, owner, provider ID and full
 content/updatedAt fingerprint. They expire after 24 hours. Guessed IDs confer no
@@ -300,14 +306,22 @@ model/extraction calls for direct writes.
 
 Envelopes: 64 KiB; structured results: 28 KiB. References: 1,000/owner, expire/sweep
 after 24 hours. Journal: 10,000 intents/owner, retained for retry safety. Capacity
-fails closed and requires an explicit retention decision, not silent journal deletion.
+fails closed for writes and requires an explicit retention decision, not silent
+journal deletion. Full edit-reference capacity does not block personal/shared reads.
 Credentials are capped at five active personal credentials per employee and 100
 active organization integrations, independently. Revoked/expired rows do not spend
 active capacity. History is bounded to 100 rows/employee and 200 organization rows;
 older inactive rows are swept after 30 days or evicted sooner to reserve capacity.
 Personal cleanup never evicts another employee's history.
-Management listing returns up to 300 rows (both bounded history buckets), so an
-admin's personal credentials cannot hide active organization credentials.
+Management listing covers both bounded history buckets (up to 300 rows) through
+UTF-8 byte-bounded pages of at most 50 credentials. GET returns the first page and
+`nextCursor`; POST `/brain/external-credentials/list` accepts strict `{cursor}` in
+the body with session, Origin/CSRF and management rate checks. No URL parameters
+are accepted. Each page rechecks current identity/org/role. Ordering has a stable
+ID tie-breaker and fixed expiry-comparison time; a changed listing or a 15-minute
+cursor expiry requires reload instead of skipping active credentials. Settings
+offers “Load more credentials” and “Reload credentials”, deduplicates appended
+rows, and ignores stale page responses after mutation or identity/role changes.
 Audits contain IDs, grants, operation, status, count and duration only—no queries,
 memory content, secrets or raw errors. The journal holds hashes/receipts, not transcripts.
 
@@ -331,6 +345,10 @@ responses. `durability.test.ts` executes production SQL against local SQLite,
 including credential capacity, journal/reference bounds, fencing, receipt failures
 and the operator SQL generator. Three additional real-Worker groups cover preflight
 recovery, identifiable ambiguous retraction and exact-snapshot reconciliation.
+`availability.test.ts` adds production-SQL query-budget, selected-only reference
+allocation, read-only/full-capacity search, TTL/concurrency and mounted management
+pagination regressions. Two further real-Worker groups check HTTP/MCP reads at
+reference capacity and session-authenticated Unicode credential pagination.
 Neither demonstrates live-provider consistency or managed-client compatibility.
 For fake-data browser verification, build web and start `scripts/preview-external.ts`.
 Fixture endpoints are never mounted by the production Worker.
@@ -343,12 +361,16 @@ consent reset on kind change, mint/list/revoke, secret non-persistence in local/
 session storage and secret absence after component remount. Authentication and fetch
 are fictional in that harness; it does not verify layout or a browser-to-gateway
 connection. Gateway/D1 behavior is covered separately by real-workerd tests.
+The latest mounted-component pass additionally exercised two-row pagination,
+load-more/reload controls, a delayed page response after revocation (ignored), and
+page-conflict error/reload recovery. This still uses mocked auth/fetch, not a
+browser session reaching the gateway or a live provider.
 
 The full test suite currently passes, including the QuickJS and MCP catalog suites
 that were previously noted as baseline loader failures. No security/type checks
 were relaxed to hide unrelated failures.
 
-Final local record: 150 tests passed (64 focused external tests), 21 real-workerd
+Final local record: 162 tests passed (76 external tests), 23 real-workerd
 verification groups passed, TypeScript and web checks passed, and the Worker/web
 dry-run build passed. Two earlier fixture runs hit a startup timeout; diagnostic
 reruns completed successfully without increasing or removing the gateway's timeout.

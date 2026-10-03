@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { verifyPersonal } from "./verify-personal.ts"
 import { verifyDurability } from "./verify-durability.ts"
+import { verifyAvailability } from "./verify-availability.ts"
 
 // Isolated, ephemeral local workerd + D1 + SQLite DO. No remote bindings/providers.
 const worker = await unstable_dev("test/external/worker.ts", {
@@ -554,6 +555,7 @@ try {
 	passed(
 		"Revocation denies the next SDK/HTTP call without disrupting another integration",
 	)
+	checks += await verifyAvailability(origin, connect)
 	console.log(
 		`${checks} workerd verification groups passed; fake providers only.`,
 	)

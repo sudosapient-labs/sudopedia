@@ -227,14 +227,15 @@ export async function listCredentials(
 	orgId: string,
 	userId: string,
 	admin: boolean,
+	asOf = Date.now(),
 ) {
 	const result = await env.DB.prepare(
 		`SELECT id, label, kind, user_id AS issuerId, grants, created_at AS createdAt,
 		expires_at AS expiresAt, revoked_at AS revokedAt FROM external_credential WHERE org_id = ?
 		AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))
-		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind = 'personal') DESC, created_at DESC LIMIT 300`,
+		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind = 'personal') DESC, created_at DESC, id DESC LIMIT 300`,
 	)
-		.bind(orgId, userId, Number(admin), Date.now())
+		.bind(orgId, userId, Number(admin), asOf)
 		.all<{
 			id: string
 			label: string

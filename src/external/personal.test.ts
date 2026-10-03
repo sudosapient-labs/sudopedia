@@ -42,6 +42,7 @@ function fixture() {
 		},
 	]
 	const store: PersonalStore = {
+		async references(owner, entries) { return Promise.all(entries.map((entry) => this.reference(owner, entry))) },
 		dispatch: vi.fn(async () => {}),
 		async reference(owner, entry) {
 			const id = key()

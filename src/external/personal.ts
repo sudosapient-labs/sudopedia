@@ -56,6 +56,8 @@ export type Intent = {
 }
 export type PersonalStore = {
 	reference: (owner: Principal, entry: PersonalEntry) => Promise<string>
+	// Aligned with entries; null means bounded edit capacity, not a read failure.
+	references: (owner: Principal, entries: PersonalEntry[], signal?: AbortSignal) => Promise<(string | null)[]>
 	lookup: (owner: Principal, reference: string) => Promise<Reference | null>
 	read: (id: string) => Promise<Journal | null>
 	claim: (owner: Principal, id: string, hash: string, intent: Intent) => Promise<boolean>
@@ -67,46 +69,56 @@ export type PersonalStore = {
 export const PREFLIGHT_MS = 8000
 export const fingerprint = (entry: PersonalEntry) =>
 	hashSecret(JSON.stringify([entry.id, entry.memory, entry.updatedAt]))
+export async function referenceId(owner: Principal, entry: PersonalEntry) {
+	const fp = await fingerprint(entry)
+	const digest = await hashSecret(JSON.stringify([owner.orgId, owner.userId, fp]))
+	return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`
+}
 export const operationId = (owner: Principal, key: string) =>
 	hashSecret(JSON.stringify([owner.orgId, owner.userId, key]))
 
 export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 	return {
 		async reference(owner, entry) {
-			const fp = await fingerprint(entry)
-			const digest = await hashSecret(
-				JSON.stringify([owner.orgId, owner.userId, fp]),
-			)
-			const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`
+			const [id] = await this.references(owner, [entry])
+			if (!id)
+				throw new ExternalError("reference_limit", 429, "Personal reference limit reached")
+			return id
+		},
+		async references(owner, entries, signal) {
+			if (!entries.length) return []
+			if (entries.length > 20)
+				throw new ExternalError("invalid_input", 400, "Too many personal references")
+			const now = Date.now()
+			const snapshots = await Promise.all(entries.map(async (entry) => ({
+				entry, id: await referenceId(owner, entry), fp: await fingerprint(entry),
+			})))
+			// One sweep and one verification per search, not three statements per row.
+			// Each insertion's capacity check remains atomic under concurrent requests.
+			signal?.throwIfAborted()
 			await env.DB.prepare(
 				"DELETE FROM external_memory_reference WHERE org_id = ? AND user_id = ? AND created_at < ?",
 			)
-				.bind(owner.orgId, owner.userId, Date.now() - 86400000)
+				.bind(owner.orgId, owner.userId, now - 86400000)
 				.run()
-			await env.DB.prepare(
-				`INSERT OR IGNORE INTO external_memory_reference
-				(id, org_id, user_id, provider_id, fingerprint, created_at)
-				SELECT ?, ?, ?, ?, ?, ? WHERE
-				(SELECT COUNT(*) FROM external_memory_reference WHERE org_id = ? AND user_id = ?) < 1000`,
-			)
-				.bind(
-					id,
-					owner.orgId,
-					owner.userId,
-					entry.id,
-					fp,
-					Date.now(),
-					owner.orgId,
-					owner.userId,
+			for (const { entry, id, fp } of snapshots) {
+				signal?.throwIfAborted()
+				await env.DB.prepare(
+					`INSERT OR IGNORE INTO external_memory_reference
+					(id, org_id, user_id, provider_id, fingerprint, created_at)
+					SELECT ?, ?, ?, ?, ?, ? WHERE
+					(SELECT COUNT(*) FROM external_memory_reference WHERE org_id = ? AND user_id = ?) < 1000`,
 				)
-				.run()
-			if (!(await this.lookup(owner, id)))
-				throw new ExternalError(
-					"reference_limit",
-					429,
-					"Personal reference limit reached",
-				)
-			return id
+					.bind(id, owner.orgId, owner.userId, entry.id, fp, now, owner.orgId, owner.userId)
+					.run()
+			}
+			signal?.throwIfAborted()
+			const rows = await env.DB.prepare(
+				`SELECT id FROM external_memory_reference WHERE org_id = ? AND user_id = ?
+				AND created_at >= ? AND id IN (${snapshots.map(() => "?").join(",")})`,
+			).bind(owner.orgId, owner.userId, now - 86400000, ...snapshots.map((s) => s.id)).all<{ id: string }>()
+			const present = new Set(rows.results.map((r) => r.id))
+			return snapshots.map((s) => present.has(s.id) ? s.id : null)
 		},
 		lookup: (owner, ref) =>
 			env.DB.prepare(

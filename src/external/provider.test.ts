@@ -45,6 +45,7 @@ describe("real provider adapter with mocked public API responses", () => {
 			const store: PersonalStore = {
 				dispatch: vi.fn(async () => {}),
 				reference: async () => "unused",
+				references: async () => [],
 				lookup: async () => null,
 				read: async (id) => journals.get(id) ?? null,
 				claim: async (_owner, id, hash) => {

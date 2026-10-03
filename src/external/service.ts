@@ -16,11 +16,12 @@ import {
 	type WriteInput,
 	type RetractInput,
 } from "./contracts"
-import { requireGrant } from "./credentials"
+import { hashSecret, requireGrant } from "./credentials"
 import { ExternalError, publicError } from "./errors"
 import { boundedText, jsonBytes, MAX_RESULT_BYTES } from "./limits"
 import {
 	maintainPersonal,
+	referenceId,
 	type PersonalStore,
 	type PersonalProvider,
 	type PersonalEntry,
@@ -208,6 +209,7 @@ export async function execute(
 				: timeout
 			try {
 				const query = parsed as SearchInput
+				const snapshots = new Map<MemoryResult, PersonalEntry>()
 				const scopes = await Promise.all([
 					...(principal.grants.includes("memory.shared:read")
 						? [
@@ -246,26 +248,19 @@ export async function execute(
 											row.id.kind === "memory" &&
 											date(source.updatedAt) !== undefined
 										) {
-											const ref = await deps.personalStore.reference(
-												principal!,
-												source as PersonalEntry,
-											)
+											const entry = source as PersonalEntry
+											const ref = await referenceId(principal!, entry)
 											row.id.value = ref
-											if (principal!.grants.includes("memory.personal:write")) {
-												row.reference = ref
+												if (principal!.grants.includes("memory.personal:write")) {
+													snapshots.set(row, entry)
+													// Reserve reference output bytes before ranking/limiting.
+													row.reference = ref
 												row.editable = true
 											}
 										} else {
-											row.id.value = await crypto.subtle
-												.digest(
-													"SHA-256",
-													new TextEncoder().encode(row.id.value),
-												)
-												.then((b) =>
-													Array.from(new Uint8Array(b), (n) =>
-														n.toString(16).padStart(2, "0"),
-													).join(""),
-												)
+											row.id.value = await hashSecret(JSON.stringify([
+												principal!.orgId, principal!.userId, row.id.value,
+											]))
 										}
 									}
 									return normalized
@@ -293,6 +288,20 @@ export async function execute(
 						continue
 					}
 					results.push(row)
+				}
+				const editable = results.filter((r) => snapshots.has(r))
+				if (editable.length) {
+					const refs = await deps.personalStore!.references(
+						principal!, editable.map((r) => snapshots.get(r)!), signal,
+					)
+					signal.throwIfAborted()
+					editable.forEach((row, i) => {
+						if (refs[i]) row.reference = refs[i]!
+						else {
+							delete row.reference
+							row.editable = false
+						}
+					})
 				}
 				result = { results, truncated }
 			} catch (error) {

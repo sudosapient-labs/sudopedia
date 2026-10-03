@@ -15,6 +15,7 @@ type Listing = {
 	credentials: Credential[]
 	mcpUrl: string
 	maxLifetimeDays: number
+	nextCursor?: { id: string; asOf: number; version: string } | null
 }
 const personalGrants = [
 	"memory.shared:read",
@@ -26,6 +27,8 @@ const organizationGrants = ["memory.shared:read", "skills.org:read"]
 export default function ExternalAccess() {
 	const { isAdmin, org, user } = useAuth()
 	const generation = useRef(0)
+	const listingRequest = useRef(0)
+	const loading = useRef(false)
 	const [kind, setKind] = useState<"personal" | "organization">("personal")
 	const grants = kind === "personal" ? personalGrants : organizationGrants
 	const [listing, setListing] = useState<Listing | null>(null)
@@ -36,9 +39,11 @@ export default function ExternalAccess() {
 	const [secret, setSecret] = useState<string | null>(null)
 	const [error, setError] = useState("")
 	const [busy, setBusy] = useState(false)
+	const [loadingPage, setLoadingPage] = useState(false)
 	const endpoint = "/brain/external-credentials/"
 	const refresh = async () => {
 		const current = generation.current
+		const request = ++listingRequest.current
 		const response = await fetch(endpoint, {
 			credentials: "include",
 			cache: "no-store",
@@ -46,7 +51,32 @@ export default function ExternalAccess() {
 		const body = await response.json()
 		if (!response.ok)
 			throw new Error(body.error?.message ?? "Unable to load credentials")
-		if (current === generation.current) setListing(body)
+		if (current === generation.current && request === listingRequest.current) setListing(body)
+	}
+	const loadMore = async () => {
+		if (!listing?.nextCursor || loading.current || busy) return
+		const current = generation.current, request = ++listingRequest.current
+		loading.current = true
+		setLoadingPage(true)
+		setError("")
+		try {
+			const response = await fetch(`${endpoint}list`, {
+				method: "POST", credentials: "include", cache: "no-store",
+				headers: { "Content-Type": "application/json", "X-Sudopedia-CSRF": "1" },
+				body: JSON.stringify({ cursor: listing.nextCursor }),
+			})
+			const body: Listing & { error?: { message?: string } } = await response.json()
+			if (!response.ok) throw new Error(body.error?.message ?? "Unable to load credentials")
+			if (current === generation.current && request === listingRequest.current)
+				setListing((previous) => previous ? { ...body, credentials: [...new Map(
+					[...previous.credentials, ...body.credentials].map((row) => [row.id, row]),
+				).values()] } : body)
+		} catch (e) {
+			if (current === generation.current && request === listingRequest.current)
+				setError(e instanceof Error ? e.message : "Unable to load credentials")
+		} finally {
+			if (current === generation.current) { loading.current = false; setLoadingPage(false) }
+		}
 	}
 	useEffect(() => {
 		generation.current++
@@ -55,7 +85,14 @@ export default function ExternalAccess() {
 		setConsent(false)
 		setKind("personal")
 		setSelected([...personalGrants])
-		if (user && org) void refresh().catch((e) => setError(e.message))
+		setBusy(false)
+		loading.current = false
+		setLoadingPage(false)
+		setError("")
+		const current = generation.current
+		if (user && org) void refresh().catch((e) => {
+			if (current === generation.current) setError(e.message)
+		})
 		return () => {
 			generation.current++
 		}
@@ -65,6 +102,7 @@ export default function ExternalAccess() {
 		setBusy(true)
 		setError("")
 		setSecret(null)
+		listingRequest.current++ // Fence an older page response before a mutation.
 		try {
 			const response = await fetch(path, {
 				method: "POST",
@@ -282,6 +320,16 @@ export default function ExternalAccess() {
 					</li>
 				))}
 			</ul>
+			{listing?.nextCursor && (
+				<Button type="button" variant="outline" disabled={busy || loadingPage} onClick={() => void loadMore()}>
+					{loadingPage ? "Loading credentials…" : "Load more credentials"}
+				</Button>
+			)}
+			<Button type="button" variant="outline" disabled={busy || loadingPage} onClick={() => {
+				const current = generation.current
+				setError("")
+				void refresh().catch((e) => { if (current === generation.current) setError(e.message) })
+			}}>Reload credentials</Button>
 		</div>
 	)
 }

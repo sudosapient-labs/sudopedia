@@ -14,18 +14,21 @@ export function sqliteFixture() {
 		INSERT INTO member(id,user_id,organization_id,role,created_at) VALUES
 		('ma','a','org','member',1),('mb','b','org','member',1),('madmin','admin','org','admin',1);
 	`)
+	let queryCount = 0, queryLimit = Infinity
+	const dispatched = () => { if (++queryCount > queryLimit) throw new Error("D1 query budget exceeded") }
 	const DB = {
 		prepare(sql: string) {
 			const query = sqlite.prepare(sql)
 			let values: SQLInputValue[] = []
 			const statement = {
 				bind(...args: SQLInputValue[]) { values = args; return statement },
-				async first<T>() { return (query.get(...values) ?? null) as T | null },
-				async all<T>() { return { results: query.all(...values) as T[] } },
-				async run() { return { meta: query.run(...values) } },
+				async first<T>() { dispatched(); return (query.get(...values) ?? null) as T | null },
+				async all<T>() { dispatched(); return { results: query.all(...values) as T[] } },
+				async run() { dispatched(); return { meta: query.run(...values) } },
 			}
 			return statement
 		},
 	}
-	return { sqlite, env: { DB } as unknown as Env }
+	return { sqlite, env: { DB } as unknown as Env, queryCount: () => queryCount,
+		resetQueryBudget(limit = Infinity) { queryCount = 0; queryLimit = limit } }
 }
