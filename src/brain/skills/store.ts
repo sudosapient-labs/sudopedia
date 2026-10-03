@@ -1,4 +1,6 @@
 import type { CompanyBrainAgent } from "../turn/agent"
+import type { SkillIndex, SkillLoadResult } from "../../external/contracts"
+import { jsonBytes, MAX_RESULT_BYTES } from "../../external/limits"
 import { isSystemSkillId, SYSTEM_SKILLS } from "./system"
 import {
 	normalizeSkillName,
@@ -522,6 +524,45 @@ export function listVisibleRuntimeSkills(
 		...visiblePersonal,
 		...org.filter((skill) => !claimed.has(normalizeSkillName(skill.name))),
 	]
+}
+
+/** Separate org-only projection: no personal precedence, system skills or bodies. */
+export function listExternalOrgSkills(agent: CompanyBrainAgent): SkillIndex[] {
+	ensureSkillTables(agent)
+	return agent.sql<SkillIndex>`
+		SELECT id, name, description, version FROM brain_skill
+		WHERE scope = 'org' AND status = 'active' ORDER BY name COLLATE NOCASE, id LIMIT 100
+	`
+}
+
+/** Count once per successful load; denied/conflicting/oversized loads do not count. */
+export function loadExternalOrgSkill(
+	agent: CompanyBrainAgent,
+	id: string,
+	expectedVersion?: number,
+): SkillLoadResult {
+	const row = getRow(agent, id)
+	if (!row || row.scope !== "org" || row.status !== "active") {
+		return { error: "not_found" }
+	}
+	if (expectedVersion !== undefined && row.version !== expectedVersion) {
+		return { error: "version_conflict", currentVersion: row.version }
+	}
+	const skill = {
+		id: row.id,
+		name: row.name,
+		description: row.description,
+		version: row.version,
+		body: row.body,
+	}
+	if (
+		new TextEncoder().encode(skill.body).byteLength > 16 * 1024 ||
+		jsonBytes({ skill }) > MAX_RESULT_BYTES
+	) {
+		return { error: "output_limit" }
+	}
+	recordSkillLoad(agent, runtimeSkillFromRow(row)!)
+	return { skill }
 }
 
 export function loadVisibleSkillByName(

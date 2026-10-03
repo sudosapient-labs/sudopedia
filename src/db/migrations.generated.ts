@@ -34,5 +34,13 @@ export const MIGRATIONS: ReadonlyArray<{
 			"CREATE INDEX `idx_slack_workspace_member_org_id` ON `slack_workspace_member` (`org_id`);",
 			"CREATE INDEX `idx_slack_workspace_member_user_id` ON `slack_workspace_member` (`user_id`);"
 		]
+	},
+	{
+		"name": "0001_pretty_white_tiger.sql",
+		"statements": [
+			"CREATE TABLE `external_credential` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`member_id` text NOT NULL,\n\t`label` text NOT NULL,\n\t`secret_hash` text NOT NULL,\n\t`grants` text NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`expires_at` integer NOT NULL,\n\t`revoked_at` integer,\n\tFOREIGN KEY (`org_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`member_id`) REFERENCES `member`(`id`) ON UPDATE no action ON DELETE cascade\n);",
+			"CREATE INDEX `external_credential_org` ON `external_credential` (`org_id`);",
+			"CREATE TABLE `external_quota` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`credential_id` text NOT NULL,\n\t`window` integer NOT NULL,\n\t`count` integer NOT NULL,\n\tFOREIGN KEY (`credential_id`) REFERENCES `external_credential`(`id`) ON UPDATE no action ON DELETE cascade\n);"
+		]
 	}
 ]

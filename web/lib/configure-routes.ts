@@ -7,6 +7,7 @@ export const CONFIGURE_SECTIONS = [
 	"proactivity",
 	"automations",
 	"skills",
+	"external-access",
 ] as const
 
 export type ConfigureSection = (typeof CONFIGURE_SECTIONS)[number]

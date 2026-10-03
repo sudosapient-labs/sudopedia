@@ -695,6 +695,22 @@ export class CompanyBrainAgent extends Agent<Env, CompanyBrainState> {
 		return (await this.loadImpl()).listSkills(this, { userId, isAdmin })
 	}
 
+	async listExternalOrgSkills() {
+		try {
+			return (await import("../skills/store")).listExternalOrgSkills(this)
+		} catch {
+			throw new Error("External skill storage unavailable")
+		}
+	}
+
+	async loadExternalOrgSkill(id: string, expectedVersion?: number) {
+		try {
+			return (await import("../skills/store")).loadExternalOrgSkill(this, id, expectedVersion)
+		} catch {
+			throw new Error("External skill storage unavailable")
+		}
+	}
+
 	async createSkill(
 		org: SlackOrg,
 		input: SkillCreateInput,
