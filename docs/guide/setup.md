@@ -6,7 +6,7 @@ Setting up Company Brain is a few one-time steps for whoever deploys it. Everyon
 
 ## 1. Deploy and open `/setup`
 
-Deploy the worker (the Deploy to Cloudflare button, or `wrangler deploy`). It asks for a supermemory API key and one model key. Then open `/setup` on your deployment. It checks, in order:
+Deploy the worker (the Deploy to Cloudflare button, or `wrangler deploy`). The deployment page shows a supermemory API key, one model key, and the optional `MODEL_BASE_URL` and `MODEL_ID` fields for your own LLM proxy. These inputs are stored as Worker secrets and persist across code deployments. For an existing Worker, add them under **Settings → Variables and Secrets** as **Secret**, then select **Deploy**. Then open `/setup` on your deployment. It checks, in order:
 
 1. **Database:** the D1 migrations have run. The worker applies them itself on its first request; if that failed, the page shows why and a **Run migrations** button to retry.
 2. **Memory:** `SUPERMEMORY_API_KEY` is set.

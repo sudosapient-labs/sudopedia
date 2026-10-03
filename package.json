@@ -3,6 +3,22 @@
 	"version": "0.1.0",
 	"private": false,
 	"type": "module",
+	"cloudflare": {
+		"bindings": {
+			"SUPERMEMORY_API_KEY": {
+				"description": "Your [supermemory API key](https://console.supermemory.ai), used to read and write the brain's memory."
+			},
+			"MODEL_API_KEY": {
+				"description": "Your LLM proxy's API key when MODEL_BASE_URL is set. Otherwise, an Anthropic, OpenAI, Google, xAI or OpenRouter API key. Stored as a secret."
+			},
+			"MODEL_BASE_URL": {
+				"description": "Optional: your OpenAI-compatible API base URL, e.g. https://llm-proxy.example.com/v1, not the full /chat/completions URL. Must be reachable from Cloudflare; localhost only works in local development. Leave blank for native providers or OpenRouter."
+			},
+			"MODEL_ID": {
+				"description": "Optional: the exact model ID/alias accepted by your proxy, used for all brain model calls. Leave blank to use the selected model's native API ID. Only applies when MODEL_BASE_URL is set."
+			}
+		}
+	},
 	"scripts": {
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",

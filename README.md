@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/supermemoryai/company-brain"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" /></a>
+  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/sudosapient-labs/sudopedia"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" /></a>
 </p>
 
 ---
@@ -98,10 +98,14 @@ TypeScript on Cloudflare Workers, Durable Objects and D1, with memory on [superm
 
 ## Deploy in five minutes
 
-**1. Click deploy.** It asks for two secrets:
+**1. Click deploy.** The deployment page includes these configuration fields:
 
 - `SUPERMEMORY_API_KEY`: where the brain keeps its memory. Get one at [console.supermemory.ai](https://console.supermemory.ai).
-- `MODEL_API_KEY`: an Anthropic, OpenAI, Google or xAI key, whichever you have. The brain works out the provider from the key. You pay the provider directly, no markup. An [OpenRouter](https://openrouter.ai) key works too, and reaches every provider's models through one account.
+- `MODEL_API_KEY`: your own LLM proxy's key when `MODEL_BASE_URL` is set. Otherwise, an Anthropic, OpenAI, Google, xAI or [OpenRouter](https://openrouter.ai) key; the brain works out the provider from the key. You pay the provider directly, no markup.
+- `MODEL_BASE_URL`: optional, your OpenAI-compatible API base URL (e.g. `https://llm-proxy.example.com/v1`). Leave blank for native providers or OpenRouter.
+- `MODEL_ID`: optional, the exact model ID/alias accepted by your proxy. Leave blank to use the selected model's native API ID.
+
+These fields are discovered from `.dev.vars.example` and stored as Worker secrets, including the URL and model ID. The deploy button uses this fork's default branch; merge the custom-endpoint PR before deploying from it.
 
 Everything else is provisioned for you: D1, KV, Durable Objects and Workers AI.
 
@@ -115,7 +119,7 @@ Your team signs in with Slack at `/` to see the brain's home, a live graph of ev
 
 ### Using your own LLM proxy
 
-For an OpenAI-compatible endpoint such as LiteLLM, set these deployment variables/secrets (or add them to `.dev.vars` locally):
+For an OpenAI-compatible endpoint such as LiteLLM, fill in `MODEL_BASE_URL`, `MODEL_API_KEY` and optionally `MODEL_ID` on the deployment page (or add them to `.dev.vars` locally):
 
 ```dotenv
 MODEL_BASE_URL="https://llm-proxy.example.com/v1"
@@ -124,7 +128,9 @@ MODEL_API_KEY="your-proxy-api-key"
 MODEL_ID="my-model-alias"
 ```
 
-Use the API base URL, not the full `/chat/completions` URL. Requests use the Chat Completions API with bearer authentication; the proxy must support streaming, tool calls and structured JSON output for the brain to work fully. HTTPS is recommended; HTTP is supported for local proxies. Keep `MODEL_API_KEY` as a secret in Cloudflare's **Settings → Variables and Secrets**, or use `wrangler secret put MODEL_API_KEY`.
+Use the API base URL, not the full `/chat/completions` URL. Requests use the Chat Completions API with bearer authentication; the proxy must support streaming, tool calls and structured JSON output for the brain to work fully. The endpoint must be reachable from Cloudflare: `localhost` only works in local development. HTTPS is recommended; HTTP is supported for local proxies.
+
+For an existing deployment, open your Worker in Cloudflare's **Settings → Variables and Secrets**, add these fields as **Secret**, and select **Deploy**. You can also use `wrangler secret put NAME` for each field. Secrets persist across code deployments. `keep_vars: true` also preserves dashboard-added plaintext variables that aren't explicitly overridden in `wrangler.jsonc`; no blank URL/model defaults are declared there.
 
 When `MODEL_BASE_URL` is set, the key is used as-is, without provider-prefix detection. This mode takes precedence over direct provider keys, OpenRouter and Cloudflare AI Gateway for brain model calls; invalid configuration fails rather than sending the key to another service. Without `MODEL_ID`, requests use the selected model's native API ID (e.g. `grok-4.5` or `claude-haiku-4-5-20251001`), without OpenRouter's vendor prefix. With `MODEL_ID`, **all** brain model calls use that exact ID, including triage and research. Provider-native xAI web search still requires a separate `XAI_API_KEY`; a proxy key does not enable it.
 
