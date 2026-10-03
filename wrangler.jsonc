@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "company-brain",
+	"name": "sudopedia",
 	"main": "src/worker.ts",
 	"compatibility_date": "2025-06-22",
 	"compatibility_flags": [
@@ -49,15 +49,15 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "company-brain",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_name": "sudopedia",
+			"database_id": "c0879ac6-88af-471a-93dc-8c2e3f358d22",
 			"migrations_dir": "drizzle"
 		}
 	],
 	"kv_namespaces": [
 		{
 			"binding": "BRAIN_KV",
-			"id": "company_brain_kv"
+			"id": "acd50be730ce48e28835a0ff80aae82e"
 		}
 	],
 	"durable_objects": {
