@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useAuth } from "@lib/auth-context"
 import { Button } from "@ui/components/button"
 import { Input } from "@ui/components/input"
@@ -6,6 +6,7 @@ import { Input } from "@ui/components/input"
 type Credential = {
 	id: string
 	label: string
+	kind: "personal" | "organization"
 	grants: string[]
 	expiresAt: number
 	revokedAt: number | null
@@ -15,20 +16,29 @@ type Listing = {
 	mcpUrl: string
 	maxLifetimeDays: number
 }
-const grants = ["memory.shared:read", "skills.org:read"] as const
+const personalGrants = [
+	"memory.shared:read",
+	"memory.personal:read",
+	"memory.personal:write",
+]
+const organizationGrants = ["memory.shared:read", "skills.org:read"]
 
 export default function ExternalAccess() {
-	const { isAdmin, org } = useAuth()
+	const { isAdmin, org, user } = useAuth()
+	const generation = useRef(0)
+	const [kind, setKind] = useState<"personal" | "organization">("personal")
+	const grants = kind === "personal" ? personalGrants : organizationGrants
 	const [listing, setListing] = useState<Listing | null>(null)
 	const [label, setLabel] = useState("")
 	const [days, setDays] = useState(7)
-	const [selected, setSelected] = useState<string[]>([...grants])
+	const [selected, setSelected] = useState<string[]>([...personalGrants])
 	const [consent, setConsent] = useState(false)
 	const [secret, setSecret] = useState<string | null>(null)
 	const [error, setError] = useState("")
 	const [busy, setBusy] = useState(false)
 	const endpoint = "/brain/external-credentials/"
 	const refresh = async () => {
+		const current = generation.current
 		const response = await fetch(endpoint, {
 			credentials: "include",
 			cache: "no-store",
@@ -36,14 +46,22 @@ export default function ExternalAccess() {
 		const body = await response.json()
 		if (!response.ok)
 			throw new Error(body.error?.message ?? "Unable to load credentials")
-		setListing(body)
+		if (current === generation.current) setListing(body)
 	}
 	useEffect(() => {
+		generation.current++
 		setSecret(null)
 		setListing(null)
-		if (isAdmin) void refresh().catch((e) => setError(e.message))
-	}, [isAdmin, org?.id])
+		setConsent(false)
+		setKind("personal")
+		setSelected([...personalGrants])
+		if (user && org) void refresh().catch((e) => setError(e.message))
+		return () => {
+			generation.current++
+		}
+	}, [isAdmin, org?.id, user?.id])
 	const mutate = async (path: string, body: unknown) => {
+		const current = generation.current
 		setBusy(true)
 		setError("")
 		setSecret(null)
@@ -61,27 +79,38 @@ export default function ExternalAccess() {
 			const result = await response.json()
 			if (!response.ok)
 				throw new Error(result.error?.message ?? "Operation failed")
+			if (current !== generation.current) return
 			if (result.secret) setSecret(result.secret)
 			await refresh()
 		} catch (e) {
-			setError(e instanceof Error ? e.message : "Operation failed")
+			if (current === generation.current)
+				setError(e instanceof Error ? e.message : "Operation failed")
 		} finally {
-			setBusy(false)
+			if (current === generation.current) setBusy(false)
 		}
 	}
-	if (!isAdmin)
+	if (!user || !org)
 		return (
 			<p className="text-sm text-[#8B929E]">
-				Only organization owners/admins can manage external access.
+				Sign in to manage your personal integrations.
 			</p>
 		)
 	return (
 		<div className="space-y-5 text-sm text-[#FAFAFA]">
 			<p className="rounded-lg border border-amber-500/30 p-4 text-amber-100">
-				Connecting an external agent discloses shared company knowledge and
-				organization procedures to its operator/provider. Revocation blocks
-				future reads; downloaded context cannot be recalled. No private memory,
-				personal skills, writes or external actions are enabled.
+				Your primary bot can receive permitted company and personal knowledge
+				and, with your personal-write consent, persist new facts, change
+				preferences and retract incorrect memories in your personal brain. It
+				cannot write shared knowledge, access private channels or another
+				employee’s memory, or run actions. Revocation stops future operations;
+				downloaded context cannot be recalled.
+			</p>
+			<p>
+				Remember only durable preferences, responsibilities and plans—not every
+				message. Tell your bot “do not remember this”, “I now own billing rather
+				than onboarding”, or “that preference was wrong; stop using it” to
+				prevent capture or correct/retract personal knowledge. The bot must
+				invoke memory tools; automatic capture depends on its configuration.
 			</p>
 			{listing && (
 				<p>
@@ -120,6 +149,7 @@ export default function ExternalAccess() {
 				onSubmit={(event) => {
 					event.preventDefault()
 					void mutate(endpoint, {
+						kind,
 						label,
 						grants: selected,
 						expiresInDays: days,
@@ -127,6 +157,32 @@ export default function ExternalAccess() {
 					})
 				}}
 			>
+				<label className="block">
+					Integration type
+					<select
+						aria-label="Integration type"
+						value={kind}
+						onChange={(event) => {
+							const next = event.target.value as "personal" | "organization"
+							setKind(next)
+							setSelected(
+								next === "personal"
+									? [...personalGrants]
+									: [...organizationGrants],
+							)
+							setConsent(false)
+							setSecret(null)
+						}}
+						className="block rounded bg-[#17191E] p-2"
+					>
+						<option value="personal">My personal primary bot</option>
+						{isAdmin && (
+							<option value="organization">
+								Organization integration (admin-only)
+							</option>
+						)}
+					</select>
+				</label>
 				<label className="block">
 					Integration label
 					<Input
@@ -149,7 +205,7 @@ export default function ExternalAccess() {
 					/>
 				</label>
 				<fieldset>
-					<legend>Read grants</legend>
+					<legend>Explicit read/write grants</legend>
 					{grants.map((grant) => (
 						<label key={grant} className="mr-5 inline-flex items-center gap-2">
 							<input
@@ -174,8 +230,9 @@ export default function ExternalAccess() {
 						required
 						onChange={(e) => setConsent(e.target.checked)}
 					/>
-					I authorize shared-company data disclosure to this external
-					agent/provider.
+					{kind === "personal"
+						? "I authorize this bot/provider to receive the selected shared/personal knowledge and, when personal-write is selected, persist captures, corrections and retractions in MY personal memory without a Slack approval for each routine write."
+						: "I authorize shared-company knowledge and organization-procedure disclosure to this external agent/provider."}
 				</label>
 				<Button
 					type="submit"
@@ -191,7 +248,12 @@ export default function ExternalAccess() {
 						className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 p-3"
 					>
 						<div>
-							<p>{credential.label}</p>
+							<p>
+								{credential.label} ·{" "}
+								{credential.kind === "personal"
+									? "Personal integration"
+									: "Organization integration"}
+							</p>
 							<p className="text-xs text-[#8B929E]">
 								{credential.grants.join(", ")} · expires{" "}
 								{new Date(credential.expiresAt).toLocaleString()} ·{" "}
@@ -209,7 +271,7 @@ export default function ExternalAccess() {
 							onClick={() => {
 								if (
 									window.confirm(
-										`Revoke ${credential.label}? Future reads will be denied.`,
+										`Revoke ${credential.label}? Future reads and writes will be denied.`,
 									)
 								)
 									void mutate(`${endpoint}${credential.id}/revoke`, {})

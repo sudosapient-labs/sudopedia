@@ -18,6 +18,8 @@ describe("external policy before transport", () => {
 		expires_at: 100,
 		revoked_at: null,
 		deleted: 0,
+		kind: "organization",
+		role: "owner",
 	}
 	it("binds exact live grants, no admin escalation", () => {
 		const principal = resolveCredential(row, "digest", 99)
@@ -49,6 +51,27 @@ describe("external policy before transport", () => {
 		expect(await hashSecret("abc")).toBe(
 			"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
 		)
+	})
+	it("binds integration kinds to grants and revalidates organization admin role", () => {
+		expect(
+			resolveCredential(
+				{
+					...row,
+					kind: "personal",
+					role: "member",
+					grants: '["memory.personal:read","memory.personal:write"]',
+				},
+				"digest",
+				99,
+			).grants,
+		).toEqual(["memory.personal:read", "memory.personal:write"])
+		for (const invalid of [
+			{ ...row, kind: "personal", grants: '["skills.org:read"]' },
+			{ ...row, kind: "organization", grants: '["memory.personal:write"]' },
+			{ ...row, role: "member" },
+			{ ...row, kind: "unknown" },
+		])
+			expect(() => resolveCredential(invalid, "digest", 99)).toThrow()
 	})
 	it("fails closed on auth storage failure without exposing database errors", async () => {
 		const env = {

@@ -20,7 +20,9 @@ with sync_playwright() as p:
     expect(page.get_by_text("MCP connection URL:")).to_be_visible()
     page.get_by_label("Integration label").fill("Fictional browser integration")
     page.get_by_label(re.compile("Expires in days")).fill("1")
-    page.get_by_label("I authorize shared-company data disclosure to this external agent/provider.").check()
+    expect(page.get_by_role("button", name="Create credential")).to_be_disabled()
+    expect(page.get_by_label("Integration type")).to_have_value("personal")
+    page.get_by_label(re.compile("I authorize this bot/provider to receive")).check()
     page.get_by_role("button", name="Create credential").click()
     secret_field = page.get_by_label("One-time bearer credential")
     expect(secret_field).to_be_visible()
@@ -41,7 +43,9 @@ with sync_playwright() as p:
     page.screenshot(path="/tmp/sudopedia-external-access-mobile.png", full_page=True)
     assert context.request.post(origin + "/fixture/session/member", data={}).ok
     page.reload()
-    expect(page.get_by_text("Only organization owners/admins can manage external access.")).to_be_visible()
-    expect(page.get_by_role("button", name="Create credential")).not_to_be_visible()
+    expect(page.get_by_label("Integration type")).to_have_value("personal")
+    expect(page.get_by_role("button", name="Create credential")).to_be_visible()
+    expect(page.get_by_text("memory.personal:write", exact=True)).to_be_visible()
+    assert page.get_by_label("Integration type").locator("option").count() == 1
     browser.close()
-print("PASS UI: canonical URL, consent, mint/list/revoke, one-time secret not persisted, reload hides secret, mobile layout, member restriction")
+print("PASS UI: personal read/write consent, mint/list/revoke, one-time secret not persisted, reload hides secret, mobile layout, member self-service without organization grants")

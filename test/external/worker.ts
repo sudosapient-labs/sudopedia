@@ -16,6 +16,13 @@ import {
 } from "../../src/brain/skills/store"
 import type { CompanyBrainAgent } from "../../src/brain/turn/agent"
 import type { AppContext } from "../../src/types"
+import { personalStore } from "../../src/external/personal"
+import {
+	fakePersonalProvider,
+	fakePersonalSearch,
+	personalRows,
+	personalMutations,
+} from "./personal-provider"
 
 export class TestSkillAgent extends DurableObject {
 	sql<T>(
@@ -140,6 +147,13 @@ app.post("/fixture/session/:actor", async (c) => {
 })
 app.post("/fixture/change", async (c) => {
 	const { action, id, grants } = await c.req.json()
+	if (action === "stale_personal") {
+		const row = personalRows.find((r) => r.id === id)
+		if (row) {
+			row.memory += " Changed outside the gateway."
+			row.updatedAt = new Date().toISOString()
+		}
+	}
 	if (action === "expire")
 		await c.env.DB.prepare(
 			"UPDATE external_credential SET expires_at = 1 WHERE id = ?",
@@ -188,6 +202,7 @@ app.get("/fixture/stats/:id", async (c) => {
 		c.env.COMPANY_BRAIN_AGENT.idFromName("org"),
 	) as unknown as TestSkillAgent
 	return c.json({
+		personalMutations,
 		providerCalls,
 		lastProviderRequest,
 		usage: await agent.usage(c.req.param("id")),
@@ -205,6 +220,9 @@ app.get("/auth/session", (c) =>
 const routes = createExternalRoutes((env, request) => ({
 	authenticate: () => authenticate(env, request),
 	quota: (principal, operation) => consumeQuota(env, principal, operation),
+	personalStore: personalStore(env),
+	personalProvider: fakePersonalProvider,
+	personalSearch: (input, owner) => fakePersonalSearch(input, owner),
 	search: async (input) => {
 		providerCalls++
 		lastProviderRequest = sharedSearchRequest(input)

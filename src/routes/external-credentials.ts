@@ -26,12 +26,10 @@ export const externalCredentialRoutes = new Hono<AppContext>()
 		c.header("Cache-Control", "no-store")
 		try {
 			const user = c.get("user"),
-				org = c.get("org"),
-				role = c.get("memberRole")
+				org = c.get("org")
 			if (!user || !org)
 				throw new ExternalError("unauthorized", 401, "Browser session required")
-			if (role !== "owner" && role !== "admin")
-				throw new ExternalError("forbidden", 403, "Owner/admin access required")
+			// Session middleware revalidates membership; personal management is self-service.
 			checkRequest(c.env, c.req.raw, c.req.method !== "GET")
 			if (
 				c.req.method !== "GET" &&
@@ -50,7 +48,12 @@ export const externalCredentialRoutes = new Hono<AppContext>()
 	})
 	.get("/", async (c) => {
 		const listing = {
-			credentials: await listCredentials(c.env, c.get("org")!.id),
+			credentials: await listCredentials(
+				c.env,
+				c.get("org")!.id,
+				c.get("user")!.id,
+				["owner", "admin"].includes(c.get("memberRole") ?? ""),
+			),
 			mcpUrl: `${canonicalOrigin(c.env)}/mcp`,
 			maxLifetimeDays: boundedSetting(
 				c.env.EXTERNAL_MAX_LIFETIME_DAYS,
@@ -91,7 +94,13 @@ export const externalCredentialRoutes = new Hono<AppContext>()
 	.post("/:id/revoke", async (c) => {
 		const id = parseInput(z.string().uuid(), c.req.param("id"))
 		parseInput(z.strictObject({}), await readJson(c.req.raw))
-		await revokeCredential(c.env, c.get("org")!.id, id)
+		await revokeCredential(
+			c.env,
+			c.get("org")!.id,
+			id,
+			c.get("user")!.id,
+			["owner", "admin"].includes(c.get("memberRole") ?? ""),
+		)
 		console.log(
 			JSON.stringify({
 				externalCredential: {

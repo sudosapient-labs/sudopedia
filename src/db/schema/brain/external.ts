@@ -15,6 +15,7 @@ export const externalCredential = sqliteTable(
 			.notNull()
 			.references(() => member.id, { onDelete: "cascade" }),
 		label: text("label").notNull(),
+		kind: text("kind").notNull().default("organization"),
 		secretHash: text("secret_hash").notNull(),
 		grants: text("grants").notNull(),
 		createdAt: integer("created_at").notNull(),
@@ -33,3 +34,45 @@ export const externalQuota = sqliteTable("external_quota", {
 	window: integer("window").notNull(),
 	count: integer("count").notNull(),
 })
+
+// References contain no memory text; scoped to a verified owner, not a bearer token.
+export const externalMemoryReference = sqliteTable(
+	"external_memory_reference",
+	{
+		id: text("id").primaryKey(),
+		orgId: text("org_id")
+			.notNull()
+			.references(() => organization.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		providerId: text("provider_id").notNull(),
+		fingerprint: text("fingerprint").notNull(),
+		createdAt: integer("created_at").notNull(),
+	},
+	(t) => [
+		index("external_memory_reference_owner").on(t.orgId, t.userId, t.createdAt),
+	],
+)
+
+// At most one unresolved provider mutation per owner. Never lease/automatically
+// retry an uncertain write: the provider has no documented idempotency/CAS key.
+export const externalMemoryOperation = sqliteTable(
+	"external_memory_operation",
+	{
+		id: text("id").primaryKey(),
+		orgId: text("org_id")
+			.notNull()
+			.references(() => organization.id, { onDelete: "cascade" }),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		requestHash: text("request_hash").notNull(),
+		state: text("state").notNull(),
+		result: text("result"),
+		createdAt: integer("created_at").notNull(),
+	},
+	(t) => [
+		index("external_memory_operation_owner").on(t.orgId, t.userId, t.state),
+	],
+)

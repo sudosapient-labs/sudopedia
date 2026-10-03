@@ -15,6 +15,20 @@
       "when": 1790964004299,
       "tag": "0001_pretty_white_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791014686190,
+      "tag": "0002_brown_kid_colt",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791015920120,
+      "tag": "0003_nervous_frog_thor",
+      "breakpoints": true
     }
   ]
 }
