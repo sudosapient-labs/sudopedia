@@ -21,6 +21,8 @@ export type CredentialRow = {
 	expires_at: number
 	revoked_at: number | null
 	deleted: number
+	kind: string
+	role: string
 }
 
 export function resolveCredential(
@@ -58,6 +60,20 @@ export function resolveCredential(
 	}
 	const grants = grantsSchema.safeParse(parsed)
 	if (!grants.success) return deny()
+	if (row.kind === "personal" && grants.data.includes("skills.org:read"))
+		return deny()
+	if (
+		row.kind === "organization" &&
+		grants.data.some((g) => g.startsWith("memory.personal:"))
+	)
+		return deny()
+	if (row.kind !== "personal" && row.kind !== "organization") return deny()
+	if (
+		row.kind === "organization" &&
+		row.role !== "owner" &&
+		row.role !== "admin"
+	)
+		return deny()
 	return {
 		credentialId: row.id,
 		userId: row.user_id,
@@ -77,13 +93,14 @@ export async function authenticate(
 	if (!match)
 		throw new ExternalError("unauthorized", 401, "Bearer credential required")
 	try {
-		const row =
-			await env.DB.prepare(`SELECT c.*, u.deleted FROM external_credential c
+		const row = await env.DB.prepare(
+			`SELECT c.*, u.deleted, m.role FROM external_credential c
 			JOIN user u ON u.id = c.user_id
 			JOIN member m ON m.id = c.member_id AND m.user_id = c.user_id AND m.organization_id = c.org_id
-			JOIN organization o ON o.id = c.org_id WHERE c.id = ?`)
-				.bind(match[2])
-				.first<CredentialRow>()
+			JOIN organization o ON o.id = c.org_id WHERE c.id = ?`,
+		)
+			.bind(match[2])
+			.first<CredentialRow>()
 		return resolveCredential(row, await hashSecret(match[1]!))
 	} catch (error) {
 		if (error instanceof ExternalError) throw error
@@ -103,8 +120,39 @@ export function requireGrant(principal: Principal, grant: Grant): void {
 export async function mintCredential(
 	env: Env,
 	actor: { orgId: string; userId: string },
-	input: { label: string; grants: Grant[]; expiresInDays: number },
+	input: {
+		label: string
+		grants: Grant[]
+		expiresInDays: number
+		kind?: "personal" | "organization"
+	},
 ) {
+	const kind = input.kind ?? "organization"
+	if (
+		(kind === "personal" && input.grants.includes("skills.org:read")) ||
+		(kind === "organization" &&
+			input.grants.some((g) => g.startsWith("memory.personal:")))
+	)
+		throw new ExternalError(
+			"forbidden",
+			403,
+			"Grants are not allowed for this integration kind",
+		)
+	const member = await env.DB.prepare(
+		`SELECT m.role FROM member m JOIN user u ON u.id = m.user_id
+		WHERE m.user_id = ? AND m.organization_id = ? AND u.deleted = 0`,
+	)
+		.bind(actor.userId, actor.orgId)
+		.first<{ role: string }>()
+	if (
+		!member ||
+		(kind === "organization" && !["owner", "admin"].includes(member.role))
+	)
+		throw new ExternalError(
+			"forbidden",
+			403,
+			"Organization integrations require owner/admin access",
+		)
 	const maxDays = boundedSetting(env.EXTERNAL_MAX_LIFETIME_DAYS, 30, 1, 90)
 	if (input.expiresInDays > maxDays)
 		throw new ExternalError(
@@ -117,18 +165,35 @@ export async function mintCredential(
 	const secret = `sd_ext_${id}_${Array.from(random, (b) => b.toString(16).padStart(2, "0")).join("")}`
 	const now = Date.now()
 	const expiresAt = now + input.expiresInDays * 86400000
-	// Bounded history: inactive credentials/counters are removed after 30 days.
+	// Scope capacity/history to the actor's personal bucket, or the admin-only
+	// organization bucket. Inactive credentials never spend active capacity.
+	const activeLimit = kind === "personal" ? 5 : 100
+	const historyLimit = kind === "personal" ? 100 : 200
 	await env.DB.prepare(
-		"DELETE FROM external_credential WHERE org_id = ? AND (expires_at < ? OR revoked_at < ?)",
+		`DELETE FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND (expires_at < ? OR revoked_at < ?)`,
 	)
-		.bind(actor.orgId, now - 30 * 86400000, now - 30 * 86400000)
+		.bind(actor.orgId, kind, kind, actor.userId, now - 30 * 86400000, now - 30 * 86400000)
 		.run()
-	const row = await env.DB.prepare(`INSERT INTO external_credential
-		(id, org_id, user_id, member_id, label, secret_hash, grants, created_at, expires_at)
-		SELECT ?, ?, ?, m.id, ?, ?, ?, ?, ? FROM member m JOIN user u ON u.id = m.user_id
-		WHERE m.user_id = ? AND m.organization_id = ? AND m.role IN ('owner', 'admin') AND u.deleted = 0
-		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ?) < 100
-		RETURNING id`)
+	await env.DB.prepare(
+		`DELETE FROM external_credential WHERE id IN (
+		SELECT id FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND (expires_at <= ? OR revoked_at IS NOT NULL)
+		ORDER BY created_at, id LIMIT MAX(0, (SELECT COUNT(*) FROM external_credential
+		WHERE org_id = ? AND kind = ? AND (? = 'organization' OR user_id = ?)) - ?))`,
+	).bind(actor.orgId, kind, kind, actor.userId, now,
+		actor.orgId, kind, kind, actor.userId, historyLimit - 1).run()
+	const row = await env.DB.prepare(
+		`INSERT INTO external_credential
+		(id, org_id, user_id, member_id, label, secret_hash, grants, created_at, expires_at, kind)
+		SELECT ?, ?, ?, m.id, ?, ?, ?, ?, ?, ? FROM member m JOIN user u ON u.id = m.user_id
+		WHERE m.user_id = ? AND m.organization_id = ? AND (? = 'personal' OR m.role IN ('owner', 'admin')) AND u.deleted = 0
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?) AND revoked_at IS NULL AND expires_at > ?) < ?
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (? = 'organization' OR user_id = ?)) < ?
+		RETURNING id`,
+	)
 		.bind(
 			id,
 			actor.orgId,
@@ -138,34 +203,49 @@ export async function mintCredential(
 			JSON.stringify(input.grants),
 			now,
 			expiresAt,
+			kind,
 			actor.userId,
 			actor.orgId,
+			kind,
 			actor.orgId,
+			kind, kind, actor.userId, now, activeLimit,
+			actor.orgId, kind, kind, actor.userId, historyLimit,
 		)
 		.first()
 	if (!row)
 		throw new ExternalError(
 			"credential_limit",
 			429,
-			"Organization credential limit reached (100)",
+			kind === "personal" ? "Personal credential limit reached (5 active)" :
+				"Organization credential limit reached (100 active)",
 		)
 	return { id, secret, expiresAt }
 }
 
-export async function listCredentials(env: Env, orgId: string) {
-	const result =
-		await env.DB.prepare(`SELECT id, label, user_id AS issuerId, grants, created_at AS createdAt,
-		expires_at AS expiresAt, revoked_at AS revokedAt FROM external_credential WHERE org_id = ? ORDER BY created_at DESC LIMIT 100`)
-			.bind(orgId)
-			.all<{
-				id: string
-				label: string
-				issuerId: string
-				grants: string
-				createdAt: number
-				expiresAt: number
-				revokedAt: number | null
-			}>()
+export async function listCredentials(
+	env: Env,
+	orgId: string,
+	userId: string,
+	admin: boolean,
+	asOf = Date.now(),
+) {
+	const result = await env.DB.prepare(
+		`SELECT id, label, kind, user_id AS issuerId, grants, created_at AS createdAt,
+		expires_at AS expiresAt, revoked_at AS revokedAt FROM external_credential WHERE org_id = ?
+		AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))
+		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind = 'personal') DESC, created_at DESC, id DESC LIMIT 300`,
+	)
+		.bind(orgId, userId, Number(admin), asOf)
+		.all<{
+			id: string
+			label: string
+			kind: "personal" | "organization"
+			issuerId: string
+			grants: string
+			createdAt: number
+			expiresAt: number
+			revokedAt: number | null
+		}>()
 	return result.results.map((row) => ({
 		...row,
 		grants: grantsSchema.parse(JSON.parse(row.grants)),
@@ -176,11 +256,13 @@ export async function revokeCredential(
 	env: Env,
 	orgId: string,
 	id: string,
+	userId: string,
+	admin: boolean,
 ): Promise<void> {
 	await env.DB.prepare(
-		"UPDATE external_credential SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND org_id = ?",
+		"UPDATE external_credential SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND org_id = ? AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))",
 	)
-		.bind(Date.now(), id, orgId)
+		.bind(Date.now(), id, orgId, userId, Number(admin))
 		.run()
 }
 
@@ -190,25 +272,36 @@ export async function consumeQuota(
 	operation: string,
 ): Promise<void> {
 	const limit = boundedSetting(
-		operation === "search"
-			? env.EXTERNAL_SEARCH_DAILY_QUOTA
-			: env.EXTERNAL_READ_DAILY_QUOTA,
-		operation === "search" ? 100 : 1000,
+		["capture", "correct", "retract"].includes(operation)
+			? env.EXTERNAL_WRITE_DAILY_QUOTA
+			: operation === "search"
+				? env.EXTERNAL_SEARCH_DAILY_QUOTA
+				: env.EXTERNAL_READ_DAILY_QUOTA,
+		["capture", "correct", "retract"].includes(operation)
+			? 50
+			: operation === "search"
+				? 100
+				: 1000,
 		1,
 		10000,
 	)
 	const window = Math.floor(Date.now() / 86400000)
-	const row =
-		await env.DB.prepare(`INSERT INTO external_quota (key, credential_id, window, count) VALUES (?, ?, ?, 1)
+	// All write methods share one cost budget, not three independently spendable budgets.
+	const quotaOperation = ["capture", "correct", "retract"].includes(operation)
+		? "write"
+		: operation
+	const row = await env.DB.prepare(
+		`INSERT INTO external_quota (key, credential_id, window, count) VALUES (?, ?, ?, 1)
 		ON CONFLICT(key) DO UPDATE SET window = excluded.window,
 		count = CASE WHEN external_quota.window = excluded.window THEN MIN(external_quota.count + 1, 10001) ELSE 1 END
-		RETURNING count`)
-			.bind(
-				`${principal.credentialId}:${operation}`,
-				principal.credentialId,
-				window,
-			)
-			.first<{ count: number }>()
+		RETURNING count`,
+	)
+		.bind(
+			`${principal.credentialId}:${quotaOperation}`,
+			principal.credentialId,
+			window,
+		)
+		.first<{ count: number }>()
 	if (!row || row.count > limit)
 		throw new ExternalError(
 			"rate_limited",

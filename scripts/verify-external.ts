@@ -2,6 +2,9 @@ import assert from "node:assert/strict"
 import { unstable_dev } from "wrangler"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { verifyPersonal } from "./verify-personal.ts"
+import { verifyDurability } from "./verify-durability.ts"
+import { verifyAvailability } from "./verify-availability.ts"
 
 // Isolated, ephemeral local workerd + D1 + SQLite DO. No remote bindings/providers.
 const worker = await unstable_dev("test/external/worker.ts", {
@@ -29,6 +32,8 @@ async function json(path: string, init: RequestInit = {}) {
 	const response = await fetch(origin + path, {
 		...init,
 		signal: AbortSignal.timeout(15000),
+	}).catch((error) => {
+		throw new Error(`Local fixture request failed: ${path}`, { cause: error })
 	})
 	return { response, body: (await response.json()) as any }
 }
@@ -60,7 +65,14 @@ try {
 	const { body: skills } = await post("/fixture/seed", {})
 	const session = await post("/fixture/session/owner", {})
 	const cookie = session.response.headers.get("set-cookie")!.split(";")[0]!
-	const management = { Cookie: cookie, Origin: origin, "X-Sudopedia-CSRF": "1" }
+	const management = {
+		Cookie: cookie,
+		Origin: origin,
+		"X-Sudopedia-CSRF": "1",
+	}
+	checks += await verifyPersonal(origin, connect)
+	checks += await verifyDurability(origin)
+	await post("/fixture/change", { action: "quota_reset" })
 	const mint = async (grants: string[]) => {
 		const result = await post(
 			"/brain/external-credentials/",
@@ -81,12 +93,16 @@ try {
 	const client = await connect(credential.secret)
 	const tools = await client.listTools()
 	assert.deepEqual(tools.tools.map((t) => t.name).sort(), [
+		"sudopedia_capture_memory",
+		"sudopedia_correct_memory",
 		"sudopedia_list_skills",
 		"sudopedia_load_skill",
+		"sudopedia_memory_write_status",
+		"sudopedia_retract_memory",
 		"sudopedia_search_memory",
 	])
 	passed(
-		"SDK initialize/version negotiation and discovery of exactly three tools in workerd",
+		"SDK initialize/version negotiation and discovery of seven tools in workerd",
 	)
 	const listed = await client.callTool({
 		name: "sudopedia_list_skills",
@@ -166,7 +182,10 @@ try {
 	passed(
 		"Skill load parity, private/disabled/guessed IDs, version conflict and successful-only accounting",
 	)
-	await post("/fixture/change", { action: "oversized_skill", id: skills.orgId })
+	await post("/fixture/change", {
+		action: "oversized_skill",
+		id: skills.orgId,
+	})
 	assert.equal(
 		(await post("/brain/external/v1/skills/load", { id: skills.orgId }, auth))
 			.response.status,
@@ -381,7 +400,7 @@ try {
 				},
 			})
 		).response.status,
-		403,
+		200,
 	)
 	assert.equal(
 		(await json("/brain/external-credentials/", { headers: auth })).response
@@ -404,7 +423,7 @@ try {
 			403,
 		)
 	passed(
-		"Session-only owner/admin management, hash/secret omission and Origin+CSRF protection",
+		"Session-only management, member personal listing, hash/secret omission and Origin+CSRF protection",
 	)
 	for (const method of ["GET", "DELETE", "PUT"])
 		assert.equal(
@@ -536,6 +555,7 @@ try {
 	passed(
 		"Revocation denies the next SDK/HTTP call without disrupting another integration",
 	)
+	checks += await verifyAvailability(origin, connect)
 	console.log(
 		`${checks} workerd verification groups passed; fake providers only.`,
 	)

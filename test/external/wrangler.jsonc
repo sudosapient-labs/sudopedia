@@ -4,7 +4,7 @@
 	"tsconfig": "../../tsconfig.json",
 	"compatibility_date": "2025-06-22",
 	"compatibility_flags": ["nodejs_compat"],
-	"vars": { "ENCRYPTION_SECRET": "fictional-local-session-signing-key", "EXTERNAL_PUBLIC_URL": "http://127.0.0.1:8799", "EXTERNAL_SEARCH_DAILY_QUOTA": "4" },
+	"vars": { "ENCRYPTION_SECRET": "fictional-local-session-signing-key", "EXTERNAL_PUBLIC_URL": "http://127.0.0.1:8799", "EXTERNAL_SEARCH_DAILY_QUOTA": "4", "EXTERNAL_WRITE_DAILY_QUOTA": "4" },
 	"d1_databases": [{ "binding": "DB", "database_name": "external-fixture", "database_id": "00000000-0000-0000-0000-000000000001" }],
 	"durable_objects": { "bindings": [{ "name": "COMPANY_BRAIN_AGENT", "class_name": "TestSkillAgent" }] },
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestSkillAgent"] }],

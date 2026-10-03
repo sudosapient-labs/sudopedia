@@ -1,11 +1,16 @@
 import { z } from "zod"
 
-export const GRANTS = ["memory.shared:read", "skills.org:read"] as const
+export const GRANTS = [
+	"memory.shared:read",
+	"skills.org:read",
+	"memory.personal:read",
+	"memory.personal:write",
+] as const
 export type Grant = (typeof GRANTS)[number]
 export const grantsSchema = z
 	.array(z.enum(GRANTS))
 	.min(1)
-	.max(2)
+	.max(4)
 	.refine((v) => new Set(v).size === v.length)
 export const topicTagSchema = z
 	.string()
@@ -23,11 +28,49 @@ export const loadSchema = z.strictObject({
 	id: z.string().uuid(),
 	expectedVersion: z.number().int().positive().optional(),
 })
+const durableContent = z
+	.string()
+	.trim()
+	.min(1)
+	.max(4000)
+	.refine(
+		(value) => new TextEncoder().encode(value).byteLength <= 4096,
+		"Memory exceeds 4 KiB",
+	)
+const requestId = z.string().uuid()
+const provenance = {
+	eventDate: z.iso.date().optional(),
+}
+export const captureSchema = z.strictObject({
+	idempotencyKey: requestId,
+	content: durableContent,
+	...provenance,
+})
+export const correctSchema = z.strictObject({
+	idempotencyKey: requestId,
+	reference: z.string().uuid(),
+	content: durableContent,
+	// Durable facts are promoted; explicitly preserve a transient fact's horizon.
+	retention: z.enum(["durable", "preserve"]).optional(),
+	...provenance,
+})
+export const retractSchema = z.strictObject({
+	idempotencyKey: requestId,
+	reference: z.string().uuid(),
+})
+export const statusSchema = z.strictObject({ idempotencyKey: requestId })
+export type WriteInput = z.infer<typeof captureSchema> & {
+	reference?: string
+	retention?: "durable" | "preserve"
+}
+export type RetractInput = z.infer<typeof retractSchema>
 export const mintSchema = z.strictObject({
 	label: z.string().trim().min(1).max(100),
 	grants: grantsSchema,
 	expiresInDays: z.number().int().min(1).max(90),
 	consent: z.literal(true),
+	// Omitted for backwards-compatible organization credentials.
+	kind: z.enum(["personal", "organization"]).default("organization"),
 })
 export type SearchInput = z.infer<typeof searchSchema>
 export type SkillIndex = {
@@ -49,6 +92,9 @@ export type Principal = {
 }
 export type MemoryResult = {
 	id: { kind: "memory" | "chunk"; value: string }
+	scope?: "shared" | "personal"
+	editable?: boolean
+	reference?: string
 	text: string
 	textTruncated: boolean
 	score?: number

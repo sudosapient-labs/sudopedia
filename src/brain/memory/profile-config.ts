@@ -102,7 +102,7 @@ export function buildBrainPersonalEntityContext(params: {
 }): string {
 	const who = params.memberName?.trim() || "this teammate"
 	return [
-		`This is ${who}'s private memory, formed only from their direct messages with Company Brain.`,
+		`This is ${who}'s private memory, formed from their direct messages with Company Brain and explicitly authorized primary-bot personal integrations.`,
 		`Capture what helps serve ${who} personally: their preferences and working patterns, their tasks and next steps, and their working context.`,
 		"Infer preferences and patterns from their behavior generously — you do not need them stated. Single-observation or low-confidence inferences should carry a short forget horizon so they fade unless they recur; when the same pattern shows up again, reinforce the existing memory. Real patterns survive, one-offs fade.",
 		"Do NOT capture company-wide facts (those belong in the shared brain) or other people's private information. This memory is private to this person.",

@@ -45,7 +45,8 @@ const SECTIONS: {
 	{
 		id: "external-access",
 		label: "External Access",
-		description: "Connect external agents to shared knowledge and organization procedures with scoped, expiring read-only credentials.",
+		description:
+			"Connect your primary bot to shared knowledge and your personal read/write memory with scoped, expiring credentials.",
 		icon: Blocks,
 	},
 	{
