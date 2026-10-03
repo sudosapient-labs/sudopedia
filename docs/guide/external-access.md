@@ -110,7 +110,8 @@ Receipts are `{status, idempotencyKey, searchable}`:
   it. Not a success claim; `searchable: false`.
 - `unknown`: dispatched but ambiguous outcome (timeout/provider failure/invalid
   response). May have applied; `searchable: false`.
-- `rejected`: verification failed before dispatch; this intent did not mutate memory.
+- `rejected`: verification or capture preflight failed before memory mutation
+  dispatch; this intent did not mutate memory and does not block later owner writes.
 
 Initial upstream failures use sanitized 502/504; retry/status returns the receipt.
 Missing grants: 403; unavailable references: 404; stale snapshots, concurrent writes
@@ -131,6 +132,9 @@ installed Supermemory 4.25.4 SDK:
   document extraction. It creates lightweight source traceability.
 - Correction uses `memories.updateMemory` (`PATCH /v4/memories`): a new version
   supersedes the old entry (`isLatest=false`). Reinforcement uses this operation too.
+  Existing metadata from the verified owner-scoped entry (including tags, sources,
+  and event dates) is retained, with integration provenance refreshed and an
+  explicitly supplied event date taking precedence.
 - Retraction uses `memories.forget` (`DELETE /v4/memories`): soft-forgotten entries
   leave memory search. This is not permanent erasure.
 - These operations do **not** modify/delete original source documents. Document

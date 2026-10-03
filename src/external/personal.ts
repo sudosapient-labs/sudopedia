@@ -9,6 +9,7 @@ export type PersonalEntry = {
 	isLatest?: boolean
 	isForgotten?: boolean
 	forgetAfter?: string | null
+	metadata?: Record<string, string | number | boolean | string[]> | null
 }
 export type WriteResult = {
 	status: "applied" | "pending" | "unknown" | "rejected"
@@ -29,6 +30,11 @@ export type PersonalProvider = {
 		providerId: string | undefined,
 		operationId: string,
 		signal: AbortSignal,
+		context: {
+			current?: PersonalEntry
+			// Call immediately before dispatching a memory mutation, not preflight reads.
+			onDispatch: () => void
+		},
 	) => Promise<{ status: "applied" | "pending" }>
 }
 export type Reference = { provider_id: string; fingerprint: string }
@@ -183,9 +189,11 @@ export async function maintainPersonal(
 		)
 	}
 	let dispatched = false
+	let current: PersonalEntry | undefined
 	try {
 		if (reference) {
-			const current = await provider.find(owner, reference.provider_id, signal)
+			current =
+				(await provider.find(owner, reference.provider_id, signal)) ?? undefined
 			if (
 				!current ||
 				current.isLatest === false ||
@@ -201,7 +209,6 @@ export async function maintainPersonal(
 				)
 		}
 		signal.throwIfAborted()
-		dispatched = true
 		const response = await provider.mutate(
 			owner,
 			operation,
@@ -209,6 +216,13 @@ export async function maintainPersonal(
 			reference?.provider_id,
 			id,
 			signal,
+			{
+				current,
+				onDispatch: () => {
+					signal.throwIfAborted()
+					dispatched = true
+				},
+			},
 		)
 		const result: WriteResult = {
 			status: response.status,

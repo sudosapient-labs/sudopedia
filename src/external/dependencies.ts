@@ -71,11 +71,12 @@ export function personalProvider(env: Env): PersonalProvider {
 			}
 			return null // Fail closed outside the bounded verification window.
 		},
-		async mutate(owner, operation, input, id, operationId, signal) {
+		async mutate(owner, operation, input, id, operationId, signal, context) {
 			const client = memoryClient(env)
 			const options = { signal, timeout: 8000, maxRetries: 0 }
 			const containerTag = personalContainer(owner.userId)
 			const metadata = {
+				...(operation === "correct" ? context.current?.metadata : {}),
 				memory_scope: "personal",
 				source_type: "external-primary-bot",
 				external_integration: owner.credentialId,
@@ -86,6 +87,7 @@ export function personalProvider(env: Env): PersonalProvider {
 					: {}),
 			}
 			if (operation === "retract") {
+				context.onDispatch()
 				const response = await client.memories.forget(
 					{
 						id,
@@ -97,6 +99,9 @@ export function personalProvider(env: Env): PersonalProvider {
 				if (!response.forgotten || response.id !== id)
 					throw new Error("Invalid provider result")
 			} else if (operation === "correct") {
+				if (!context.current || context.current.id !== id)
+					throw new Error("Verified personal memory required")
+				context.onDispatch()
 				const response = await client.memories.updateMemory(
 					{
 						id,
@@ -150,6 +155,7 @@ export function personalProvider(env: Env): PersonalProvider {
 				)
 				if (existing.results.some((row) => row.memory?.trim() === content))
 					return { status: "applied" }
+				context.onDispatch()
 				const response = await client.post<{ memories: Array<{ id: string }> }>(
 					"/v4/memories",
 					{

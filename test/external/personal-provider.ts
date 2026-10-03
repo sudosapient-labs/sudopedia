@@ -5,7 +5,10 @@ import type {
 } from "../../src/external/personal"
 import type { Principal, SearchInput } from "../../src/external/contracts"
 
-type Row = PersonalEntry & { owner: string; metadata: Record<string, unknown> }
+type Row = PersonalEntry & {
+	owner: string
+	metadata: NonNullable<PersonalEntry["metadata"]>
+}
 export const personalRows: Row[] = [
 	{
 		id: "employee-a-preference",
@@ -42,7 +45,8 @@ export const fakePersonalProvider: PersonalProvider = {
 			) ?? null
 		)
 	},
-	async mutate(owner, operation, input, id, operationId, signal) {
+	async mutate(owner, operation, input, id, operationId, signal, context) {
+		context.onDispatch()
 		personalMutations++
 		if ("content" in input && input.content === "pending fictional fact")
 			return { status: "pending" }
@@ -85,6 +89,7 @@ export const fakePersonalProvider: PersonalProvider = {
 				memory: (input as { content: string }).content,
 				updatedAt: new Date().toISOString(),
 				metadata: {
+					...(operation === "correct" ? context.current?.metadata : {}),
 					memory_scope: "personal",
 					source_type: "external-primary-bot",
 					external_operation: operationId,

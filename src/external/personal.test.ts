@@ -87,20 +87,23 @@ function fixture() {
 			async (owner, id) =>
 				entries.find((r) => r.owner === owner.userId && r.id === id) ?? null,
 		),
-		mutate: vi.fn(async (owner, operation, input, id) => {
-			const old = entries.find((r) => r.owner === owner.userId && r.id === id)
-			if (operation === "retract") old!.isForgotten = true
-			else {
-				if (old) old.isLatest = false
-				entries.push({
-					id: key(),
-					owner: owner.userId,
-					memory: (input as { content: string }).content,
-					updatedAt: new Date().toISOString(),
-				})
-			}
-			return { status: "applied" as const }
-		}),
+		mutate: vi.fn(
+			async (owner, operation, input, id, _operationId, _signal, context) => {
+				context.onDispatch()
+				const old = entries.find((r) => r.owner === owner.userId && r.id === id)
+				if (operation === "retract") old!.isForgotten = true
+				else {
+					if (old) old.isLatest = false
+					entries.push({
+						id: key(),
+						owner: owner.userId,
+						memory: (input as { content: string }).content,
+						updatedAt: new Date().toISOString(),
+					})
+				}
+				return { status: "applied" as const }
+			},
+		),
 	}
 	const run = (
 		operation: "capture" | "correct" | "retract" | "status",
@@ -195,9 +198,12 @@ describe("personal memory maintenance", () => {
 	it("never retries uncertain provider failures; keeps owner reads possible and writes blocked", async () => {
 		const f = fixture(),
 			input = { idempotencyKey: key(), content: "Durable fact" }
-		f.provider.mutate = vi.fn(async () => {
-			throw new Error("secret/content must not leak")
-		})
+		f.provider.mutate = vi.fn(
+			async (_p, _op, _input, _id, _operationId, _signal, context) => {
+				context.onDispatch()
+				throw new Error("secret/content must not leak")
+			},
+		)
 		await expect(f.run("capture", input)).rejects.toMatchObject({
 			status: 502,
 			message:
@@ -215,7 +221,12 @@ describe("personal memory maintenance", () => {
 	it("reports pending asynchronous mock responses without claiming searchability or redispatch", async () => {
 		const f = fixture(),
 			input = { idempotencyKey: key(), content: "Preference" }
-		f.provider.mutate = vi.fn(async () => ({ status: "pending" as const }))
+		f.provider.mutate = vi.fn(
+			async (_p, _op, _input, _id, _operationId, _signal, context) => {
+				context.onDispatch()
+				return { status: "pending" as const }
+			},
+		)
 		expect(await f.run("capture", input)).toMatchObject({
 			status: "pending",
 			searchable: false,
@@ -231,7 +242,8 @@ describe("personal memory maintenance", () => {
 			abort = new AbortController(),
 			input = { idempotencyKey: key(), content: "Preference" }
 		f.provider.mutate = vi.fn(
-			async (_p, _op, _input, _id, _operationId, signal) => {
+			async (_p, _op, _input, _id, _operationId, signal, context) => {
+				context.onDispatch()
 				abort.abort()
 				signal.throwIfAborted()
 				return { status: "applied" as const }
@@ -243,6 +255,81 @@ describe("personal memory maintenance", () => {
 		expect(
 			await f.run("status", { idempotencyKey: input.idempotencyKey }),
 		).toMatchObject({ status: "unknown" })
+	})
+	it("rejects preflight failures without blocking later owner writes", async () => {
+		const f = fixture(),
+			input = { idempotencyKey: key(), content: "Preference" },
+			mutate = f.provider.mutate
+		f.provider.mutate = vi.fn(async () => {
+			throw new Error("Preflight read failed")
+		})
+		await expect(f.run("capture", input)).rejects.toMatchObject({ status: 502 })
+		expect(
+			await f.run("status", { idempotencyKey: input.idempotencyKey }),
+		).toMatchObject({
+			status: "rejected",
+			searchable: false,
+		})
+		f.provider.mutate = mutate
+		expect(
+			await f.run("capture", { ...input, idempotencyKey: key() }),
+		).toMatchObject({
+			status: "applied",
+		})
+	})
+	it("passes the verified correction snapshot to the adapter", async () => {
+		const f = fixture(),
+			entry = f.entries[0]!
+		entry.metadata = { brain_tags: ["topic_billing"], event_date: "2026-10-01" }
+		const reference = await f.store.reference(a, entry)
+		await f.run("correct", {
+			idempotencyKey: key(),
+			reference,
+			content: "New responsibility",
+		})
+		expect(f.provider.mutate).toHaveBeenCalledWith(
+			a,
+			"correct",
+			expect.anything(),
+			entry.id,
+			expect.any(String),
+			expect.anything(),
+			expect.objectContaining({
+				current: entry,
+				onDispatch: expect.any(Function),
+			}),
+		)
+	})
+	it("rejects cancellation during preflight before marking a memory dispatch", async () => {
+		const f = fixture(),
+			abort = new AbortController(),
+			input = { idempotencyKey: key(), content: "Preference" },
+			mutation = vi.fn()
+		f.provider.mutate = async (
+			_p,
+			_op,
+			_input,
+			_id,
+			_operationId,
+			_signal,
+			context,
+		) => {
+			abort.abort()
+			context.onDispatch()
+			mutation()
+			return { status: "applied" }
+		}
+		await expect(
+			f.run("capture", input, a, abort.signal),
+		).rejects.toMatchObject({
+			status: 504,
+		})
+		expect(mutation).not.toHaveBeenCalled()
+		expect(
+			await f.run("status", { idempotencyKey: input.idempotencyKey }),
+		).toMatchObject({
+			status: "rejected",
+		})
 	})
 	it("applies grant checks, quotas, strict payloads, global read limit and content-free audits", async () => {
 		const f = fixture()
