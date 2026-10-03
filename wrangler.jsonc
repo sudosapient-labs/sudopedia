@@ -1,6 +1,14 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "sudopedia",
+	"workers_dev": true,
+	"routes": [
+		{
+			"pattern": "sudopedia.sudosapient.dev",
+			"custom_domain": true,
+			"zone_name": "sudosapient.dev"
+		}
+	],
 	"main": "src/worker.ts",
 	"compatibility_date": "2025-06-22",
 	"compatibility_flags": [
@@ -31,6 +39,7 @@
 		]
 	},
 	"vars": {
+		"PUBLIC_URL": "https://sudopedia.sudosapient.dev",
 		// "on" once the Workers Paid block below is enabled: sandbox tools then
 		// run on a Cloudflare container.
 		"CONTAINER_SANDBOX": "off",
