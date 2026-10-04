@@ -123,6 +123,10 @@ Receipts are `{status, idempotencyKey, searchable}`:
 Initial upstream failures use sanitized 502/504; retry/status returns the receipt.
 Missing grants: 403; unavailable references: 404; stale snapshots, concurrent writes
 or changed-input retries: 409; schema/payload: 400/413; quotas: 429.
+Incompatible existing provider metadata returns `unsupported_metadata` (409) during
+preflight: no memory mutation is dispatched, the receipt is `rejected`, and other
+owner writes remain available. A retry of that intent returns its rejected receipt;
+after resolving the incompatibility, use a new idempotency key.
 Receipts describe the historical operation, not whether a later correction or
 retraction has since changed that fact. Errors retain `{error:{code,message}}`, never raw upstream errors. Skill behavior
 retains unavailable-ID indistinguishability, version conflicts and successful-only
@@ -133,7 +137,8 @@ usage accounting.
 Checked official [memory operations](https://supermemory.ai/docs/recall/memory-operations),
 [document operations](https://supermemory.ai/docs/ingestion/document-operations), and
 [published v4 OpenAPI](https://api.supermemory.ai/v4/openapi) on 2026-10-03, alongside
-installed Supermemory 4.25.4 SDK:
+installed Supermemory 4.25.4 SDK; rechecked the list/PATCH metadata contracts on
+2026-10-04:
 
 - Capture uses supported `POST /v4/memories`, one explicit fact, bypassing asynchronous
   document extraction. It creates lightweight source traceability.
@@ -146,6 +151,14 @@ installed Supermemory 4.25.4 SDK:
   intentionally keeps a still-transient fact's existing horizon. Capture also
   explicitly requests no expiry. Responses must confirm the durable horizon was
   cleared before the gateway reports applied.
+- The published list response permits arbitrary JSON metadata, but PATCH permits
+  only strings, finite numbers, booleans and string arrays. Correction and expiring
+  repeat reinforcement validate the merged metadata before dispatch. Unsupported
+  values (such as null fields, nested objects or mixed arrays) are not silently
+  dropped/coerced: that operation fails preflight without losing fields or locking
+  future writes. An authorized operator/provider workflow must resolve incompatible
+  metadata before that fact can be corrected/promoted here. Permanent exact-text
+  no-ops and retraction do not PATCH metadata and remain available.
 - Retraction uses `memories.forget` (`DELETE /v4/memories`): soft-forgotten entries
   leave memory search. This is not permanent erasure.
 - These operations do **not** modify/delete original source documents. Document
@@ -349,7 +362,11 @@ recovery, identifiable ambiguous retraction and exact-snapshot reconciliation.
 allocation, read-only/full-capacity search, TTL/concurrency and mounted management
 pagination regressions. Two further real-Worker groups check HTTP/MCP reads at
 reference capacity and session-authenticated Unicode credential pagination.
-Neither demonstrates live-provider consistency or managed-client compatibility.
+`provider-metadata.test.ts` uses production SQL and the installed SDK with fictional
+fetch to cover invalid correction/reinforcement metadata, rejected receipts/retries,
+subsequent-write recovery, supported metadata/provenance preservation, absent
+metadata, permanent no-ops and retraction. It is not live-provider validation.
+These checks do not demonstrate live-provider consistency or managed-client compatibility.
 For fake-data browser verification, build web and start `scripts/preview-external.ts`.
 Fixture endpoints are never mounted by the production Worker.
 
@@ -370,7 +387,7 @@ The full test suite currently passes, including the QuickJS and MCP catalog suit
 that were previously noted as baseline loader failures. No security/type checks
 were relaxed to hide unrelated failures.
 
-Final local record: 162 tests passed (76 external tests), 23 real-workerd
+Final local record: 173 tests passed (87 external tests), 23 real-workerd
 verification groups passed, TypeScript and web checks passed, and the Worker/web
 dry-run build passed. Two earlier fixture runs hit a startup timeout; diagnostic
 reruns completed successfully without increasing or removing the gateway's timeout.

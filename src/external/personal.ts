@@ -9,7 +9,8 @@ export type PersonalEntry = {
 	isLatest?: boolean
 	isForgotten?: boolean
 	forgetAfter?: string | null
-	metadata?: Record<string, string | number | boolean | string[]> | null
+	// List responses permit arbitrary JSON; mutation metadata has a narrower contract.
+	metadata?: Record<string, unknown> | null
 }
 export type WriteResult = {
 	status: "applied" | "pending" | "unknown" | "rejected"

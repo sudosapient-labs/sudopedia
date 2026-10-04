@@ -14,6 +14,23 @@ import {
 } from "./personal"
 import { ExternalError } from "./errors"
 
+type MutationMetadata = Record<string, string | number | boolean | string[]>
+const unsupportedMetadata = () => new ExternalError(
+	"unsupported_metadata", 409,
+	"Personal memory metadata cannot be preserved safely; no memory write was dispatched",
+)
+function validateMutationMetadata(metadata: Record<string, unknown>): MutationMetadata {
+	// Provider list metadata allows arbitrary JSON. PATCH accepts only these values.
+	// Reject incompatible entries in preflight; never drop/coerce provenance fields.
+	for (const value of Object.values(metadata)) {
+		if (typeof value === "string" || typeof value === "boolean" ||
+			(typeof value === "number" && Number.isFinite(value)) ||
+			(Array.isArray(value) && Array.from(value).every((item) => typeof item === "string"))) continue
+		throw unsupportedMetadata()
+	}
+	return metadata as MutationMetadata
+}
+
 /** Only this server-built request reaches the provider; no caller container/filter pass-through. */
 export function sharedSearchRequest(input: SearchInput, threshold = 0.3) {
 	return {
@@ -113,25 +130,31 @@ export function personalProvider(env: Env): PersonalProvider {
 			const client = memoryClient(env)
 			const options = { signal, timeout: 8000, maxRetries: 0 }
 			const containerTag = personalContainer(owner.userId)
-			const metadataFor = (entry?: PersonalEntry) => ({
-				...entry?.metadata,
-				memory_scope: "personal",
-				source_type: "external-primary-bot",
-				external_integration: owner.credentialId,
-				external_operation: operationId,
-				ingestion_date: new Date().toISOString().slice(0, 10),
-				...("eventDate" in input && input.eventDate
-					? { event_date: input.eventDate }
-					: {}),
-			})
+			const metadataFor = (entry?: PersonalEntry) => {
+				if (entry?.metadata != null &&
+					(typeof entry.metadata !== "object" || Array.isArray(entry.metadata)))
+					throw unsupportedMetadata()
+				return validateMutationMetadata({
+					...entry?.metadata,
+					memory_scope: "personal",
+					source_type: "external-primary-bot",
+					external_integration: owner.credentialId,
+					external_operation: operationId,
+					ingestion_date: new Date().toISOString().slice(0, 10),
+					...("eventDate" in input && input.eventDate
+						? { event_date: input.eventDate }
+						: {}),
+				})
+			}
 			const update = async (entry: PersonalEntry, preserveExpiry = false) => {
+				const metadata = metadataFor(entry)
 				await context.onDispatch({ action: "correct", providerId: entry.id,
 					fingerprint: await fingerprint(entry) })
 				const response = await client.memories.updateMemory({
 					id: entry.id,
 					containerTag,
 					newContent: (input as { content: string }).content,
-					metadata: metadataFor(entry),
+					metadata,
 					...(!preserveExpiry ? { forgetAfter: null } : {}),
 				}, options)
 				if (!response.id || response.parentMemoryId !== entry.id ||
@@ -189,6 +212,7 @@ export function personalProvider(env: Env): PersonalProvider {
 					if (current.forgetAfter) await update(current)
 					return { status: "applied" }
 				}
+				const metadata = metadataFor()
 				await context.onDispatch({ action: "capture" })
 				const response = await client.post<{ memories: Array<{ id: string }> }>(
 					"/v4/memories",
@@ -201,7 +225,7 @@ export function personalProvider(env: Env): PersonalProvider {
 									content: (input as { content: string }).content,
 									isStatic: false,
 									forgetAfter: null,
-									metadata: metadataFor(),
+									metadata,
 								},
 							],
 						},
