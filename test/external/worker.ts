@@ -16,6 +16,15 @@ import {
 } from "../../src/brain/skills/store"
 import type { CompanyBrainAgent } from "../../src/brain/turn/agent"
 import type { AppContext } from "../../src/types"
+import { personalStore } from "../../src/external/personal"
+import { reconcilePersonalOperation } from "../../src/external/reconciliation"
+import { publicError } from "../../src/external/errors"
+import {
+	fakePersonalProvider,
+	fakePersonalSearch,
+	personalRows,
+	personalMutations,
+} from "./personal-provider"
 
 export class TestSkillAgent extends DurableObject {
 	sql<T>(
@@ -100,6 +109,7 @@ const app = new Hono<AppContext>({ strict: false })
 let migrated: Promise<unknown> | undefined
 let providerCalls = 0
 let lastProviderRequest: unknown
+let journalFailures = 0
 app.use("*", async (c, next) => {
 	await (migrated ??= applyMigrations(c.env))
 	await next()
@@ -140,6 +150,19 @@ app.post("/fixture/session/:actor", async (c) => {
 })
 app.post("/fixture/change", async (c) => {
 	const { action, id, grants } = await c.req.json()
+	if (action === "expire_preflight")
+		await c.env.DB.prepare("UPDATE external_memory_operation SET deadline_at=1 WHERE id=?").bind(id).run()
+	if (action === "claim_preflight")
+		await personalStore(c.env).claim({ orgId: "org", userId: "delegate", credentialId: "fixture", grants: [] },
+			id, "fixture-hash", { operation: "capture" })
+	if (action === "journal_failure") journalFailures = 1
+	if (action === "stale_personal") {
+		const row = personalRows.find((r) => r.id === id)
+		if (row) {
+			row.memory += " Changed outside the gateway."
+			row.updatedAt = new Date().toISOString()
+		}
+	}
 	if (action === "expire")
 		await c.env.DB.prepare(
 			"UPDATE external_credential SET expires_at = 1 WHERE id = ?",
@@ -176,6 +199,18 @@ app.post("/fixture/change", async (c) => {
 		).oversizedBody(id)
 	return c.json({ ok: true })
 })
+app.get("/fixture/journal/:id", async (c) => c.json(await c.env.DB.prepare(
+	"SELECT * FROM external_memory_operation WHERE id=?",
+).bind(c.req.param("id")).first()))
+app.post("/fixture/reconcile", async (c) => {
+	try {
+		await reconcilePersonalOperation(c.env, await c.req.json())
+		return c.json({ ok: true })
+	} catch (error) {
+		const safe = publicError(error)
+		return c.json({ error: safe.code }, safe.status)
+	}
+})
 app.post("/fixture/rate-limit", async (c) => {
 	const key = crypto.randomUUID()
 	let rejected = 0
@@ -183,11 +218,26 @@ app.post("/fixture/rate-limit", async (c) => {
 		if (!(await c.env.EXTERNAL_RATE_LIMITER.limit({ key })).success) rejected++
 	return c.json({ rejected })
 })
+app.post("/fixture/availability", async (c) => {
+	// Test-only capacity setup in two statements; never uses provider data/writes.
+	await c.env.DB.prepare(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<1000)
+		INSERT OR IGNORE INTO external_memory_reference(id,org_id,user_id,provider_id,fingerprint,created_at)
+		SELECT 'capacity-' || n,'org','delegate','fictional','fp',? FROM nums
+		LIMIT MAX(0,1000-(SELECT COUNT(*) FROM external_memory_reference WHERE org_id='org' AND user_id='delegate'))`).bind(Date.now()).run()
+	await c.env.DB.prepare(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<200)
+		INSERT INTO external_credential(id,org_id,user_id,member_id,label,secret_hash,grants,created_at,expires_at,revoked_at,kind)
+		SELECT printf('00000000-0000-4000-8000-%012d',n),'org','delegate',
+		(SELECT id FROM member WHERE user_id='delegate' AND organization_id='org'),?,
+		'fictional-unused-hash','["memory.shared:read"]',1,?,CASE WHEN n<=100 THEN NULL ELSE 1 END,'organization' FROM nums`)
+		.bind("記".repeat(100), Date.now() + 86400000).run()
+	return c.json({ ok: true })
+})
 app.get("/fixture/stats/:id", async (c) => {
 	const agent = c.env.COMPANY_BRAIN_AGENT.get(
 		c.env.COMPANY_BRAIN_AGENT.idFromName("org"),
 	) as unknown as TestSkillAgent
 	return c.json({
+		personalMutations,
 		providerCalls,
 		lastProviderRequest,
 		usage: await agent.usage(c.req.param("id")),
@@ -205,6 +255,15 @@ app.get("/auth/session", (c) =>
 const routes = createExternalRoutes((env, request) => ({
 	authenticate: () => authenticate(env, request),
 	quota: (principal, operation) => consumeQuota(env, principal, operation),
+	personalStore: {
+		...personalStore(env),
+		async finish(id, result) {
+			if (journalFailures > 0) { journalFailures--; throw new Error("Fictional journal failure") }
+			await personalStore(env).finish(id, result)
+		},
+	},
+	personalProvider: fakePersonalProvider,
+	personalSearch: (input, owner) => fakePersonalSearch(input, owner),
 	search: async (input) => {
 		providerCalls++
 		lastProviderRequest = sharedSearchRequest(input)

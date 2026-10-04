@@ -1,0 +1,2 @@
+CREATE INDEX `external_memory_operation_owner` ON `external_memory_operation` (`org_id`,`user_id`,`state`);--> statement-breakpoint
+CREATE INDEX `external_memory_reference_owner` ON `external_memory_reference` (`org_id`,`user_id`,`created_at`);

@@ -1,0 +1,13 @@
+{
+	"id": "operator-test",
+	"orgId": "org",
+	"userId": "a",
+	"requestHash": "hash",
+	"phase": "dispatched",
+	"providerAction": "retract",
+	"providerId": "target'quoted",
+	"targetFingerprint": "fp",
+	"outcome": "applied",
+	"originalRequestStopped": true,
+	"providerVerified": true
+}

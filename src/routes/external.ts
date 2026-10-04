@@ -81,6 +81,23 @@ export function createExternalRoutes(
 	routes.get("/brain/external/v1/skills", async (c) =>
 		c.json(await execute(factory(c.env, c.req.raw), "list", {})),
 	)
+	for (const operation of [
+		"capture",
+		"correct",
+		"retract",
+		"status",
+	] as const) {
+		routes.post(`/brain/external/v1/memory/${operation}`, async (c) =>
+			c.json(
+				await execute(
+					factory(c.env, c.req.raw),
+					operation,
+					await readJson(c.req.raw),
+					c.req.raw.signal,
+				),
+			),
+		)
+	}
 	routes.post("/brain/external/v1/skills/load", async (c) =>
 		c.json(
 			await execute(

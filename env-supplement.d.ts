@@ -6,6 +6,7 @@ interface Env {
 	EXTERNAL_SEARCH_THRESHOLD?: string
 	EXTERNAL_SEARCH_DAILY_QUOTA?: string
 	EXTERNAL_READ_DAILY_QUOTA?: string
+	EXTERNAL_WRITE_DAILY_QUOTA?: string
 	EXTERNAL_RATE_LIMITER: { limit(options: { key: string }): Promise<{ success: boolean }> }
 	EXTERNAL_MANAGEMENT_RATE_LIMITER: { limit(options: { key: string }): Promise<{ success: boolean }> }
 	SUPERMEMORY_API_KEY: string

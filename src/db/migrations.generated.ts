@@ -42,5 +42,33 @@ export const MIGRATIONS: ReadonlyArray<{
 			"CREATE INDEX `external_credential_org` ON `external_credential` (`org_id`);",
 			"CREATE TABLE `external_quota` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`credential_id` text NOT NULL,\n\t`window` integer NOT NULL,\n\t`count` integer NOT NULL,\n\tFOREIGN KEY (`credential_id`) REFERENCES `external_credential`(`id`) ON UPDATE no action ON DELETE cascade\n);"
 		]
+	},
+	{
+		"name": "0002_brown_kid_colt.sql",
+		"statements": [
+			"CREATE TABLE `external_memory_operation` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`request_hash` text NOT NULL,\n\t`state` text NOT NULL,\n\t`result` text,\n\t`created_at` integer NOT NULL,\n\tFOREIGN KEY (`org_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade\n);",
+			"CREATE TABLE `external_memory_reference` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`provider_id` text NOT NULL,\n\t`fingerprint` text NOT NULL,\n\t`created_at` integer NOT NULL,\n\tFOREIGN KEY (`org_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade\n);",
+			"ALTER TABLE `external_credential` ADD `kind` text DEFAULT 'organization' NOT NULL;"
+		]
+	},
+	{
+		"name": "0003_nervous_frog_thor.sql",
+		"statements": [
+			"CREATE INDEX `external_memory_operation_owner` ON `external_memory_operation` (`org_id`,`user_id`,`state`);",
+			"CREATE INDEX `external_memory_reference_owner` ON `external_memory_reference` (`org_id`,`user_id`,`created_at`);"
+		]
+	},
+	{
+		"name": "0004_mushy_maria_hill.sql",
+		"statements": [
+			"ALTER TABLE `external_memory_operation` ADD `operation` text DEFAULT 'legacy' NOT NULL;",
+			"ALTER TABLE `external_memory_operation` ADD `phase` text DEFAULT 'dispatched' NOT NULL;",
+			"ALTER TABLE `external_memory_operation` ADD `provider_action` text;",
+			"ALTER TABLE `external_memory_operation` ADD `provider_id` text;",
+			"ALTER TABLE `external_memory_operation` ADD `target_fingerprint` text;",
+			"ALTER TABLE `external_memory_operation` ADD `deadline_at` integer;",
+			"ALTER TABLE `external_memory_operation` ADD `dispatched_at` integer;",
+			"ALTER TABLE `external_memory_operation` ADD `reconciled_at` integer;"
+		]
 	}
 ]
