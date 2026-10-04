@@ -66,7 +66,8 @@ fixture.fetch = async (input, init) => {
 		credentials: page,
 		nextCursor: start + page.length < credentials.length ? { id: page.at(-1)!.id, asOf: Date.now(), version: "a".repeat(64) } : null,
 		mcpUrl: "https://fictional.invalid/mcp",
-		maxLifetimeDays: 30,
+		maxLifetimeDays: 365,
+		employeeConnectionsEnabled: true,
 	})
 }
 document.body.innerHTML = '<main id="external-ui-fixture"></main>'

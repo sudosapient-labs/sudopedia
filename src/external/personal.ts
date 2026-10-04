@@ -13,6 +13,7 @@ export type PersonalEntry = {
 	metadata?: Record<string, unknown> | null
 }
 export type WriteResult = {
+	scope?: "shared"
 	status: "applied" | "pending" | "unknown" | "rejected"
 	idempotencyKey: string
 	searchable: boolean
@@ -56,6 +57,7 @@ export type Intent = {
 	fingerprint?: string
 }
 export type PersonalStore = {
+	scope?: "shared"
 	reference: (owner: Principal, entry: PersonalEntry) => Promise<string>
 	// Aligned with entries; null means bounded edit capacity, not a read failure.
 	references: (owner: Principal, entries: PersonalEntry[], signal?: AbortSignal) => Promise<(string | null)[]>
@@ -70,52 +72,68 @@ export type PersonalStore = {
 export const PREFLIGHT_MS = 8000
 export const fingerprint = (entry: PersonalEntry) =>
 	hashSecret(JSON.stringify([entry.id, entry.memory, entry.updatedAt]))
-export async function referenceId(owner: Principal, entry: PersonalEntry) {
+export async function referenceId(owner: Principal, entry: PersonalEntry, scope?: "shared") {
 	const fp = await fingerprint(entry)
-	const digest = await hashSecret(JSON.stringify([owner.orgId, owner.userId, fp]))
+	const digest = await hashSecret(JSON.stringify(scope
+		? [scope, owner.orgId, owner.userId, fp] : [owner.orgId, owner.userId, fp]))
 	return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`
 }
-export const operationId = (owner: Principal, key: string) =>
-	hashSecret(JSON.stringify([owner.orgId, owner.userId, key]))
+export const operationId = (owner: Principal, key: string, scope?: "shared") =>
+	hashSecret(JSON.stringify(scope
+		? [scope, owner.orgId, owner.userId, key] : [owner.orgId, owner.userId, key]))
 
 export function personalStore(env: Pick<Env, "DB">): PersonalStore {
+	return memoryStore(env)
+}
+export function sharedStore(env: Pick<Env, "DB">): PersonalStore {
+	return memoryStore(env, "shared")
+}
+// Scope adapters are selected by the server. References stay actor-bound;
+// coordination is employee-wide for personal, organization-wide for shared.
+function memoryStore(env: Pick<Env, "DB">, scope?: "shared"): PersonalStore {
+	const label = scope ? "Shared" : "Personal"
+	const referenceTable = scope ? "external_shared_reference" : "external_memory_reference"
+	const operationTable = scope ? "external_shared_operation" : "external_memory_operation"
+	const domain = scope ? "org_id = ?" : "org_id = ? AND user_id = ?"
+	const domainBindings = (owner: Principal) => scope ? [owner.orgId] : [owner.orgId, owner.userId]
 	return {
+		...(scope ? { scope } : {}),
 		async reference(owner, entry) {
 			const [id] = await this.references(owner, [entry])
 			if (!id)
-				throw new ExternalError("reference_limit", 429, "Personal reference limit reached")
+				throw new ExternalError("reference_limit", 429, `${label} reference limit reached`)
 			return id
 		},
 		async references(owner, entries, signal) {
 			if (!entries.length) return []
 			if (entries.length > 20)
-				throw new ExternalError("invalid_input", 400, "Too many personal references")
+				throw new ExternalError("invalid_input", 400, `Too many ${label.toLowerCase()} references`)
 			const now = Date.now()
 			const snapshots = await Promise.all(entries.map(async (entry) => ({
-				entry, id: await referenceId(owner, entry), fp: await fingerprint(entry),
+				entry, id: await referenceId(owner, entry, scope), fp: await fingerprint(entry),
 			})))
 			// One sweep and one verification per search, not three statements per row.
 			// Each insertion's capacity check remains atomic under concurrent requests.
 			signal?.throwIfAborted()
 			await env.DB.prepare(
-				"DELETE FROM external_memory_reference WHERE org_id = ? AND user_id = ? AND created_at < ?",
+				`DELETE FROM ${referenceTable} WHERE org_id = ? AND user_id = ? AND created_at < ?`,
 			)
 				.bind(owner.orgId, owner.userId, now - 86400000)
 				.run()
 			for (const { entry, id, fp } of snapshots) {
 				signal?.throwIfAborted()
 				await env.DB.prepare(
-					`INSERT OR IGNORE INTO external_memory_reference
+					`INSERT OR IGNORE INTO ${referenceTable}
 					(id, org_id, user_id, provider_id, fingerprint, created_at)
 					SELECT ?, ?, ?, ?, ?, ? WHERE
-					(SELECT COUNT(*) FROM external_memory_reference WHERE org_id = ? AND user_id = ?) < 1000`,
+					(SELECT COUNT(*) FROM ${referenceTable} WHERE org_id = ? AND user_id = ?) < 1000`,
 				)
 					.bind(id, owner.orgId, owner.userId, entry.id, fp, now, owner.orgId, owner.userId)
 					.run()
 			}
 			signal?.throwIfAborted()
 			const rows = await env.DB.prepare(
-				`SELECT id FROM external_memory_reference WHERE org_id = ? AND user_id = ?
+				`SELECT id FROM ${referenceTable} WHERE org_id = ? AND user_id = ?
 				AND created_at >= ? AND id IN (${snapshots.map(() => "?").join(",")})`,
 			).bind(owner.orgId, owner.userId, now - 86400000, ...snapshots.map((s) => s.id)).all<{ id: string }>()
 			const present = new Set(rows.results.map((r) => r.id))
@@ -123,19 +141,19 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 		},
 		lookup: (owner, ref) =>
 			env.DB.prepare(
-				`SELECT provider_id, fingerprint FROM external_memory_reference
+				`SELECT provider_id, fingerprint FROM ${referenceTable}
 			WHERE id = ? AND org_id = ? AND user_id = ? AND created_at >= ?`,
 			)
 				.bind(ref, owner.orgId, owner.userId, Date.now() - 86400000)
 				.first<Reference>(),
 		async read(id) {
 			await env.DB.prepare(
-				`UPDATE external_memory_operation SET state = 'rejected', result =
+				`UPDATE ${operationTable} SET state = 'rejected', result =
 				'{"status":"rejected","searchable":false}'
 				WHERE id = ? AND state = 'pending' AND phase = 'preflight' AND deadline_at <= ?`,
 			).bind(id, Date.now()).run()
 			return env.DB.prepare(
-				"SELECT request_hash, state, result FROM external_memory_operation WHERE id = ?",
+				`SELECT request_hash, state, result FROM ${operationTable} WHERE id = ?`,
 			)
 				.bind(id)
 				.first<Journal>()
@@ -143,18 +161,18 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 		async claim(owner, id, hash, intent) {
 			const now = Date.now()
 			await env.DB.prepare(
-				`UPDATE external_memory_operation SET state = 'rejected', result =
+				`UPDATE ${operationTable} SET state = 'rejected', result =
 				'{"status":"rejected","searchable":false}'
-				WHERE org_id = ? AND user_id = ? AND state = 'pending'
+				WHERE ${domain} AND state = 'pending'
 				AND phase = 'preflight' AND deadline_at <= ?`,
-			).bind(owner.orgId, owner.userId, now).run()
+			).bind(...domainBindings(owner), now).run()
 			const row = await env.DB.prepare(
-				`INSERT OR IGNORE INTO external_memory_operation
+				`INSERT OR IGNORE INTO ${operationTable}
 					(id, org_id, user_id, request_hash, state, created_at,
 					operation, phase, provider_id, target_fingerprint, deadline_at)
 					SELECT ?, ?, ?, ?, 'pending', ?, ?, 'preflight', ?, ?, ? WHERE
-				NOT EXISTS (SELECT 1 FROM external_memory_operation WHERE org_id = ? AND user_id = ? AND state IN ('pending', 'unknown'))
-				AND (SELECT COUNT(*) FROM external_memory_operation WHERE org_id = ? AND user_id = ?) < 10000 RETURNING id`,
+				NOT EXISTS (SELECT 1 FROM ${operationTable} WHERE ${domain} AND state IN ('pending', 'unknown'))
+				AND (SELECT COUNT(*) FROM ${operationTable} WHERE ${domain}) < 10000 RETURNING id`,
 			)
 				.bind(
 					id,
@@ -166,10 +184,8 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 						intent.providerId ?? null,
 						intent.fingerprint ?? null,
 						now + PREFLIGHT_MS,
-					owner.orgId,
-					owner.userId,
-					owner.orgId,
-					owner.userId,
+					...domainBindings(owner),
+					...domainBindings(owner),
 				)
 				.first()
 			return Boolean(row)
@@ -177,18 +193,18 @@ export function personalStore(env: Pick<Env, "DB">): PersonalStore {
 		async dispatch(id, dispatch) {
 			const now = Date.now()
 			const row = await env.DB.prepare(
-				`UPDATE external_memory_operation SET phase = 'dispatched',
+				`UPDATE ${operationTable} SET phase = 'dispatched',
 				provider_action = ?, provider_id = ?, target_fingerprint = ?, dispatched_at = ?
 				WHERE id = ? AND state = 'pending' AND phase = 'preflight'
 				AND deadline_at > ? RETURNING id`,
 			).bind(dispatch.action, dispatch.providerId ?? null,
 				dispatch.fingerprint ?? null, now, id, now).first()
 			if (!row) throw new ExternalError("write_conflict", 409,
-				"Personal write preflight expired; check status before a new intent")
+				`${label} write preflight expired; check status before a new intent`)
 		},
 		async finish(id, result) {
 			const row = await env.DB.prepare(
-					"UPDATE external_memory_operation SET state = ?, result = ? WHERE id = ? AND state IN ('pending', 'unknown') AND reconciled_at IS NULL RETURNING id",
+					`UPDATE ${operationTable} SET state = ?, result = ? WHERE id = ? AND state IN ('pending', 'unknown') AND reconciled_at IS NULL RETURNING id`,
 			)
 				.bind(result.status, JSON.stringify(result), id)
 					.first()
@@ -210,9 +226,12 @@ export async function maintainPersonal(
 	input: WriteInput | RetractInput | { idempotencyKey: string },
 	signal: AbortSignal,
 ): Promise<WriteResult> {
-	const id = await operationId(owner, input.idempotencyKey)
-	const { idempotencyKey: _key, ...intent } = input
-	const hash = await hashSecret(JSON.stringify([operation, intent]))
+	const label = store.scope ? "Shared" : "Personal"
+	const id = await operationId(owner, input.idempotencyKey, store.scope)
+	// Omitted and explicit personal scope preserve the legacy request identity.
+	const { idempotencyKey: _key, scope: _scope, ...intent } = input as WriteInput
+	const hash = await hashSecret(JSON.stringify(store.scope
+		? [store.scope, operation, intent] : [operation, intent]))
 	const prior = await store.read(id)
 	const replay = (row: Journal): WriteResult => {
 		if (operation !== "status" && row.request_hash !== hash)
@@ -221,13 +240,14 @@ export async function maintainPersonal(
 				409,
 				"Idempotency key already used for different input",
 			)
-		return row.result
+		const result = row.result
 			? { ...JSON.parse(row.result), idempotencyKey: input.idempotencyKey }
 			: {
 					status: "pending",
 					idempotencyKey: input.idempotencyKey,
 					searchable: false,
 				}
+		return { ...result, ...(store.scope ? { scope: store.scope } : {}) }
 	}
 	if (prior) return replay(prior)
 	if (operation === "status")
@@ -239,7 +259,7 @@ export async function maintainPersonal(
 			throw new ExternalError(
 				"not_found",
 				404,
-				"Personal memory reference unavailable; search again",
+				`${label} memory reference unavailable; search again`,
 			)
 	}
 	if (!(await store.claim(owner, id, hash, {
@@ -252,7 +272,7 @@ export async function maintainPersonal(
 		throw new ExternalError(
 			"write_conflict",
 			409,
-			"Another personal write is unresolved or journal capacity reached",
+			`Another ${label.toLowerCase()} write is unresolved or journal capacity reached`,
 		)
 	}
 	let dispatched = false
@@ -272,7 +292,7 @@ export async function maintainPersonal(
 				throw new ExternalError(
 					"stale_reference",
 					409,
-					"Personal memory changed or is unavailable; search again",
+					`${label} memory changed or is unavailable; search again`,
 				)
 		}
 		signal.throwIfAborted()
@@ -294,6 +314,7 @@ export async function maintainPersonal(
 			},
 		)
 		const result: WriteResult = {
+			...(store.scope ? { scope: store.scope } : {}),
 			status: response.status,
 			idempotencyKey: input.idempotencyKey,
 			searchable: response.status === "applied" && operation !== "retract",
@@ -321,7 +342,7 @@ export async function maintainPersonal(
 			signal.aborted ? 504 : 502,
 			dispatched
 				? "Write outcome unknown; check status and do not submit a new key"
-				: "Personal memory verification unavailable",
+				: `${label} memory verification unavailable`,
 		)
 	}
 }

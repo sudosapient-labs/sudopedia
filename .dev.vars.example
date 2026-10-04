@@ -31,6 +31,8 @@ MODEL_ID=""
 # with OPENROUTER_API_KEY set to your router key. Model ids stay vendor/model.
 
 # ── Optional ──────────────────────────────────────────────────────────────────
+# Local employee-bot creation; production enablement requires a staged rollout.
+# EXTERNAL_EMPLOYEE_CREATION_ENABLED="on"
 # Sandbox tools (shell, git, files). On Workers Paid, with the paid block in
 # wrangler.jsonc enabled and CONTAINER_SANDBOX set to "on", they run on a
 # Cloudflare container (local dev then needs Docker). On the free plan, or if

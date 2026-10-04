@@ -2,7 +2,10 @@
 interface Env {
 	/** Explicit canonical origin for external access; never inferred from request headers. */
 	EXTERNAL_PUBLIC_URL?: string
+	/** Legacy configuration is ignored: new lifetime policy is always 1–365 days. */
 	EXTERNAL_MAX_LIFETIME_DAYS?: string
+	/** Set to "on" only after compatible backend/schema rollout to expose new creation. */
+	EXTERNAL_EMPLOYEE_CREATION_ENABLED?: string
 	EXTERNAL_SEARCH_THRESHOLD?: string
 	EXTERNAL_SEARCH_DAILY_QUOTA?: string
 	EXTERNAL_READ_DAILY_QUOTA?: string

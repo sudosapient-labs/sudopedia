@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { verifyPersonal } from "./verify-personal.ts"
 import { verifyDurability } from "./verify-durability.ts"
 import { verifyAvailability } from "./verify-availability.ts"
+import { verifyGatewayV2 } from "./verify-gateway-v2.ts"
 
 // Isolated, ephemeral local workerd + D1 + SQLite DO. No remote bindings/providers.
 const worker = await unstable_dev("test/external/worker.ts", {
@@ -72,6 +73,7 @@ try {
 	}
 	checks += await verifyPersonal(origin, connect)
 	checks += await verifyDurability(origin)
+	checks += await verifyGatewayV2(origin, connect)
 	await post("/fixture/change", { action: "quota_reset" })
 	const mint = async (grants: string[]) => {
 		const result = await post(

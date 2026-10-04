@@ -29,6 +29,6 @@ export function sqliteFixture() {
 			return statement
 		},
 	}
-	return { sqlite, env: { DB } as unknown as Env, queryCount: () => queryCount,
+	return { sqlite, env: { DB, EXTERNAL_EMPLOYEE_CREATION_ENABLED: "on" } as unknown as Env, queryCount: () => queryCount,
 		resetQueryBudget(limit = Infinity) { queryCount = 0; queryLimit = limit } }
 }

@@ -40,6 +40,9 @@ export type ExternalDependencies = {
 	) => Promise<unknown>
 	personalStore?: PersonalStore
 	personalProvider?: PersonalProvider
+	sharedStore?: PersonalStore
+	sharedProvider?: PersonalProvider
+	privateSearch?: (input: SearchInput, principal: Principal, signal: AbortSignal) => Promise<unknown>
 	listSkills: (orgId: string) => Promise<SkillIndex[]>
 	loadSkill: (
 		orgId: string,
@@ -90,7 +93,7 @@ function sources(value: unknown): string[] {
 export function normalizeSearch(
 	response: unknown,
 	limit: number,
-	scope: "shared" | "personal" = "shared",
+	scope: "shared" | "personal" | "private_channel" = "shared",
 ) {
 	const raw = object(response).results
 	const candidates = Array.isArray(raw) ? raw : []
@@ -112,10 +115,10 @@ export function normalizeSearch(
 		)
 		const metadata = object(row.metadata)
 		// Defense in depth for incorrectly tagged provider data; missing scope is
-		// accepted only because the server has already selected the shared container.
+		// accepted only because the server has already selected the authorized container.
 		if (
 			metadata.memory_scope !== undefined &&
-			!(scope === "shared" ? ["shared"] : ["personal", "dm"]).includes(
+			!(scope === "shared" ? ["shared"] : scope === "private_channel" ? ["private_channel"] : ["personal", "dm"]).includes(
 				String(metadata.memory_scope),
 			)
 		)
@@ -154,6 +157,89 @@ export function normalizeSearch(
 	return { results, truncated }
 }
 
+async function searchMemory(deps: ExternalDependencies, principal: Principal,
+	input: SearchInput, signal: AbortSignal) {
+	const recall = input.recall ?? (principal.kind === "employee" ||
+		principal.grants.includes("memory.shared:write") ? "current" : "historical")
+	const query = recall === "current" ? { ...input, recall } : input
+	const snapshots = new Map<MemoryResult, { entry: PersonalEntry; store: PersonalStore }>()
+	const targets = [
+		{ scope: "shared" as const, grant: "memory.shared:read" as const,
+			write: "memory.shared:write" as const, store: deps.sharedStore,
+			search: () => deps.search(query, signal) },
+		{ scope: "personal" as const, grant: "memory.personal:read" as const,
+			write: "memory.personal:write" as const, store: deps.personalStore,
+			search: () => deps.personalSearch?.(query, principal, signal) },
+		{ scope: "private_channel" as const, grant: "memory.private-channel:read" as const,
+			write: null, store: undefined,
+			search: () => deps.privateSearch?.(query, principal, signal) },
+	].filter((t) => (!input.scope || input.scope === t.scope) && principal.grants.includes(t.grant))
+	const scopes = await Promise.all(targets.map(async (target) => {
+		signal.throwIfAborted()
+		const raw = await target.search()
+		if (raw === undefined) throw new ExternalError("unavailable", 503, "Memory scope unavailable")
+		const normalized = normalizeSearch(raw, query.limit, target.scope)
+		const excluded = new Set<MemoryResult>()
+		if (object(raw).truncated === true) normalized.truncated = true
+		const rows = object(raw).results
+		for (const row of normalized.results) {
+			signal.throwIfAborted()
+			if (target.scope === "shared") row.recall = recall
+			// Current-fact recall must not promote historical chunks as current truth.
+			if (target.scope === "shared" && recall === "current" && row.id.kind !== "memory") {
+				excluded.add(row); continue
+			}
+			const source = object(Array.isArray(rows) ? rows.find((r) => object(r).id === row.id.value) : undefined)
+			if (object(source.metadata).external_org !== undefined &&
+				object(source.metadata).external_org !== principal.orgId) {
+				excluded.add(row); continue
+			}
+			const entry = source as PersonalEntry
+			const editable = target.write && principal.grants.includes(target.write) &&
+				target.store && (target.scope !== "shared" || recall === "current") &&
+				row.id.kind === "memory" && date(source.updatedAt) !== undefined
+			if (target.scope === "personal" || editable) {
+				row.id.value = row.id.kind === "memory" && date(source.updatedAt) !== undefined
+					? await referenceId(principal, entry, target.scope === "shared" ? "shared" : undefined)
+					: await hashSecret(JSON.stringify([principal.orgId, principal.userId, row.id.value]))
+			}
+			if (editable) {
+				row.reference = row.id.value
+				row.editable = true
+				snapshots.set(row, { entry, store: target.store! })
+			}
+		}
+		normalized.results = normalized.results.filter((r) => !excluded.has(r))
+		return normalized
+	}))
+	signal.throwIfAborted()
+	const combined = scopes.flatMap((s) => s.results).sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+	const results: MemoryResult[] = [], seen = new Set<string>()
+	let truncated = scopes.some((s) => s.truncated)
+	for (const row of combined) {
+		const key = `${row.scope}:${row.id.kind}:${row.id.value}`
+		if (seen.has(key)) continue
+		seen.add(key)
+		if (results.length >= query.limit ||
+			jsonBytes({ results: [...results, row], truncated: true }) > MAX_RESULT_BYTES) {
+			truncated = true; continue
+		}
+		results.push(row)
+	}
+	// Allocate only selected references, grouped by adapter: at most 24 statements
+	// for 20 mixed editable results, not 22 statements for each scope's candidates.
+	for (const store of new Set(results.flatMap((r) => snapshots.has(r) ? [snapshots.get(r)!.store] : []))) {
+		const selected = results.filter((r) => snapshots.get(r)?.store === store)
+		const refs = await store.references(principal, selected.map((r) => snapshots.get(r)!.entry), signal)
+		signal.throwIfAborted()
+		selected.forEach((row, i) => {
+			if (refs[i]) row.reference = refs[i]!
+			else { delete row.reference; row.editable = false }
+		})
+	}
+	return { results, truncated }
+}
+
 /** Reauthenticate every operation, even after MCP initialization. No cached principal. */
 export async function execute(
 	deps: ExternalDependencies,
@@ -171,7 +257,7 @@ export async function execute(
 		if (operation === "search") {
 			if (
 				!principal.grants.some(
-					(g) => g === "memory.shared:read" || g === "memory.personal:read",
+					(g) => g === "memory.shared:read" || g === "memory.personal:read" || g === "memory.private-channel:read",
 				)
 			)
 				throw new ExternalError(
@@ -179,13 +265,8 @@ export async function execute(
 					403,
 					"Required read grant not present",
 				)
-		} else
-			requireGrant(
-				principal,
-				["list", "load"].includes(operation)
-					? "skills.org:read"
-					: "memory.personal:write",
-			)
+		} else if (["list", "load"].includes(operation))
+			requireGrant(principal, "skills.org:read")
 		const parsed =
 			operation === "search"
 				? parseInput(searchSchema, input)
@@ -200,6 +281,13 @@ export async function execute(
 								: operation === "status"
 									? parseInput(statusSchema, input)
 									: parseInput(listSchema, input)
+		const scope = (parsed as WriteInput).scope ?? "personal"
+		if (!["search", "list", "load"].includes(operation))
+			requireGrant(principal, scope === "shared" ? "memory.shared:write" : "memory.personal:write")
+		const searchScope = (parsed as SearchInput).scope
+		if (operation === "search" && searchScope)
+			requireGrant(principal, searchScope === "shared" ? "memory.shared:read" :
+				searchScope === "personal" ? "memory.personal:read" : "memory.private-channel:read")
 		await deps.quota(principal, operation)
 		let result: unknown
 		if (operation === "search") {
@@ -208,102 +296,7 @@ export async function execute(
 				? AbortSignal.any([timeout, requestSignal])
 				: timeout
 			try {
-				const query = parsed as SearchInput
-				const snapshots = new Map<MemoryResult, PersonalEntry>()
-				const scopes = await Promise.all([
-					...(principal.grants.includes("memory.shared:read")
-						? [
-								deps
-									.search(query, signal)
-									.then((r) => normalizeSearch(r, query.limit)),
-							]
-						: []),
-					...(principal.grants.includes("memory.personal:read")
-						? [
-								(async () => {
-									if (!deps.personalSearch || !deps.personalStore)
-										throw new ExternalError(
-											"unavailable",
-											503,
-											"Personal memory unavailable",
-										)
-									const raw = await deps.personalSearch(
-										query,
-										principal!,
-										signal,
-									)
-									const normalized = normalizeSearch(
-										raw,
-										query.limit,
-										"personal",
-									)
-									const rows = object(raw).results as unknown[]
-									for (const row of normalized.results) {
-										signal.throwIfAborted()
-										// Keep personal provider IDs opaque even for read-only credentials.
-										const source = object(
-											rows.find((r) => object(r).id === row.id.value),
-										)
-										if (
-											row.id.kind === "memory" &&
-											date(source.updatedAt) !== undefined
-										) {
-											const entry = source as PersonalEntry
-											const ref = await referenceId(principal!, entry)
-											row.id.value = ref
-												if (principal!.grants.includes("memory.personal:write")) {
-													snapshots.set(row, entry)
-													// Reserve reference output bytes before ranking/limiting.
-													row.reference = ref
-												row.editable = true
-											}
-										} else {
-											row.id.value = await hashSecret(JSON.stringify([
-												principal!.orgId, principal!.userId, row.id.value,
-											]))
-										}
-									}
-									return normalized
-								})(),
-							]
-						: []),
-				])
-				signal.throwIfAborted()
-				const seen = new Set<string>()
-				const combined = scopes
-					.flatMap((s) => s.results)
-					.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-				const results: MemoryResult[] = []
-				let truncated = scopes.some((s) => s.truncated)
-				for (const row of combined) {
-					const key = `${row.scope}:${row.id.kind}:${row.id.value}`
-					if (seen.has(key)) continue
-					seen.add(key)
-					if (
-						results.length >= query.limit ||
-						jsonBytes({ results: [...results, row], truncated: true }) >
-							MAX_RESULT_BYTES
-					) {
-						truncated = true
-						continue
-					}
-					results.push(row)
-				}
-				const editable = results.filter((r) => snapshots.has(r))
-				if (editable.length) {
-					const refs = await deps.personalStore!.references(
-						principal!, editable.map((r) => snapshots.get(r)!), signal,
-					)
-					signal.throwIfAborted()
-					editable.forEach((row, i) => {
-						if (refs[i]) row.reference = refs[i]!
-						else {
-							delete row.reference
-							row.editable = false
-						}
-					})
-				}
-				result = { results, truncated }
+				result = await searchMemory(deps, principal, parsed as SearchInput, signal)
 			} catch (error) {
 				if (error instanceof ExternalError) throw error
 				throw new ExternalError(
@@ -364,18 +357,20 @@ export async function execute(
 			result = loaded
 			resultCount = 1
 		} else {
-			if (!deps.personalStore || !deps.personalProvider)
+			const store = scope === "shared" ? deps.sharedStore : deps.personalStore
+			const provider = scope === "shared" ? deps.sharedProvider : deps.personalProvider
+			if (!store || !provider)
 				throw new ExternalError(
 					"unavailable",
 					503,
-					"Personal memory unavailable",
+					`${scope === "shared" ? "Shared" : "Personal"} memory unavailable`,
 				)
 			const signal = requestSignal
 				? AbortSignal.any([requestSignal, AbortSignal.timeout(8000)])
 				: AbortSignal.timeout(8000)
 			result = await maintainPersonal(
-				deps.personalStore,
-				deps.personalProvider,
+				store,
+				provider,
 				principal,
 				operation,
 				parsed as WriteInput | RetractInput,
