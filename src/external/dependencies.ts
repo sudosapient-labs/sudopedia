@@ -5,19 +5,22 @@ import { authenticate, consumeQuota } from "./credentials"
 import { hashSecret } from "./credentials"
 import { boundedSetting } from "./limits"
 import type { ExternalDependencies } from "./service"
-import type { SearchInput } from "./contracts"
+import { sharedSearchRequest } from "./search-request"
+export { sharedSearchRequest } from "./search-request"
 import {
 	personalStore,
+	sharedStore,
 	fingerprint,
 	type PersonalEntry,
 	type PersonalProvider,
 } from "./personal"
 import { ExternalError } from "./errors"
+import { privateChannelSearch } from "./private-channels"
 
 type MutationMetadata = Record<string, string | number | boolean | string[]>
 const unsupportedMetadata = () => new ExternalError(
 	"unsupported_metadata", 409,
-	"Personal memory metadata cannot be preserved safely; no memory write was dispatched",
+	"Memory metadata cannot be preserved safely; no memory write was dispatched",
 )
 function validateMutationMetadata(metadata: Record<string, unknown>): MutationMetadata {
 	// Provider list metadata allows arbitrary JSON. PATCH accepts only these values.
@@ -30,38 +33,6 @@ function validateMutationMetadata(metadata: Record<string, unknown>): MutationMe
 	}
 	return metadata as MutationMetadata
 }
-
-/** Only this server-built request reaches the provider; no caller container/filter pass-through. */
-export function sharedSearchRequest(input: SearchInput, threshold = 0.3) {
-	return {
-		q: input.query,
-		limit: input.limit,
-		containerTag: "sm_org_shared",
-		searchMode: "hybrid" as const,
-		threshold,
-		rerank: false,
-		rewriteQuery: false,
-		include: {
-			documents: false,
-			summaries: false,
-			relatedMemories: false,
-			forgottenMemories: false,
-		},
-		...(input.topicTags?.length
-			? {
-					filters: {
-						OR: input.topicTags.map((tag) => ({
-							key: "brain_tags",
-							value: tag,
-							filterType: "array_contains" as const,
-							negate: false,
-						})),
-					},
-				}
-			: {}),
-	}
-}
-
 export const personalContainer = (userId: string) => `user_${userId}`
 
 // The documented document-ingestion API creates missing containers. SuperRAG
@@ -101,6 +72,18 @@ async function ensurePersonalContainer(
 
 /** Public provider v4 CRUD, verified against its OpenAPI, not document updates. */
 export function personalProvider(env: Env): PersonalProvider {
+	return memoryProvider(env)
+}
+export function sharedProvider(env: Env): PersonalProvider {
+	return memoryProvider(env, "shared")
+}
+function memoryProvider(env: Env, scope: "personal" | "shared" = "personal"): PersonalProvider {
+	const containerFor = (owner: Parameters<PersonalProvider["find"]>[0]) =>
+		scope === "shared" ? "sm_org_shared" : personalContainer(owner.userId)
+	const inScope = (entry: PersonalEntry, owner: Parameters<PersonalProvider["find"]>[0]) =>
+		(entry.metadata?.external_org === undefined || entry.metadata.external_org === owner.orgId) &&
+		(entry.metadata?.memory_scope === undefined ||
+			(scope === "shared" ? ["shared"] : ["personal", "dm"]).includes(String(entry.metadata?.memory_scope)))
 	return {
 		async find(owner, id, signal) {
 			const client = memoryClient(env)
@@ -110,7 +93,7 @@ export function personalProvider(env: Env): PersonalProvider {
 					pagination: { totalPages: number }
 				}>("/v4/memories/list", {
 					body: {
-						containerTags: [personalContainer(owner.userId)],
+						containerTags: [containerFor(owner)],
 						limit: 100,
 						page,
 						sort: "updatedAt",
@@ -121,7 +104,7 @@ export function personalProvider(env: Env): PersonalProvider {
 					maxRetries: 0,
 				})
 				const found = response.memoryEntries.find((row) => row.id === id)
-				if (found) return found
+				if (found) return inScope(found, owner) ? found : null
 				if (page >= response.pagination.totalPages) break
 			}
 			return null // Fail closed outside the bounded verification window.
@@ -129,14 +112,16 @@ export function personalProvider(env: Env): PersonalProvider {
 		async mutate(owner, operation, input, id, operationId, signal, context) {
 			const client = memoryClient(env)
 			const options = { signal, timeout: 8000, maxRetries: 0 }
-			const containerTag = personalContainer(owner.userId)
+			const containerTag = containerFor(owner)
 			const metadataFor = (entry?: PersonalEntry) => {
 				if (entry?.metadata != null &&
 					(typeof entry.metadata !== "object" || Array.isArray(entry.metadata)))
 					throw unsupportedMetadata()
 				return validateMutationMetadata({
 					...entry?.metadata,
-					memory_scope: "personal",
+					memory_scope: scope,
+					external_actor: owner.userId,
+					external_org: owner.orgId,
 					source_type: "external-primary-bot",
 					external_integration: owner.credentialId,
 					external_operation: operationId,
@@ -176,11 +161,12 @@ export function personalProvider(env: Env): PersonalProvider {
 					throw new Error("Invalid provider result")
 			} else if (operation === "correct") {
 				if (!context.current || context.current.id !== id)
-					throw new Error("Verified personal memory required")
+					throw new Error("Verified memory required")
 				await update(context.current, (input as { retention?: string }).retention === "preserve")
 			} else {
 				const content = (input as { content: string }).content
-				await ensurePersonalContainer(env, owner, signal)
+				if (scope === "personal") await ensurePersonalContainer(env, owner, signal)
+				else await client.get(`/v3/container-tags/${encodeURIComponent(containerTag)}`, options)
 				const existing = await client.search.memories(
 					{
 						q: content,
@@ -208,7 +194,7 @@ export function personalProvider(env: Env): PersonalProvider {
 						current.memory.trim() !== content ||
 						(current.forgetAfter && Date.parse(current.forgetAfter) <= Date.now()))
 						throw new ExternalError("stale_reference", 409,
-							"Matching personal memory changed or is unavailable; search again")
+							`Matching ${scope} memory changed or is unavailable; search again`)
 					if (current.forgetAfter) await update(current)
 					return { status: "applied" }
 				}
@@ -274,6 +260,9 @@ export function externalDependencies(
 			),
 		personalStore: personalStore(env),
 		personalProvider: personalProvider(env),
+		sharedStore: sharedStore(env),
+		sharedProvider: sharedProvider(env),
+		privateSearch: (input, principal, signal) => privateChannelSearch(env, input, principal, signal),
 		listSkills: async (orgId) => (await agent(orgId)).listExternalOrgSkills(),
 		loadSkill: async (orgId, id, expectedVersion) =>
 			(await agent(orgId)).loadExternalOrgSkill(id, expectedVersion),

@@ -16,12 +16,17 @@ import {
 } from "../../src/brain/skills/store"
 import type { CompanyBrainAgent } from "../../src/brain/turn/agent"
 import type { AppContext } from "../../src/types"
-import { personalStore } from "../../src/external/personal"
+import { personalStore, sharedStore } from "../../src/external/personal"
+import { privateChannelSearch } from "../../src/external/private-channels"
+import { encryptToken } from "../../src/compat/lib/crypto"
+import { fakeSlackFetch, setSlackFixture } from "./private-slack"
 import { reconcilePersonalOperation } from "../../src/external/reconciliation"
 import { publicError } from "../../src/external/errors"
 import {
 	fakePersonalProvider,
 	fakePersonalSearch,
+	fakeSharedProvider,
+	fakeSharedSearch,
 	personalRows,
 	personalMutations,
 } from "./personal-provider"
@@ -129,6 +134,8 @@ app.post("/fixture/seed", async (c) => {
 		c.env.DB.prepare(
 			"INSERT OR IGNORE INTO user (id, email, name, created_at, updated_at) VALUES ('delegate', 'delegate@example.invalid', 'Fixture Admin', 1, 1)",
 		),
+		c.env.DB.prepare("INSERT OR IGNORE INTO user(id,email,name,created_at,updated_at) VALUES ('gateway-admin','gateway-admin@example.invalid','Fixture V2 Admin',1,1)"),
+		c.env.DB.prepare("INSERT OR IGNORE INTO member(id,user_id,organization_id,role,created_at) VALUES ('m-gateway-admin','gateway-admin','org','admin',1)"),
 		c.env.DB.prepare(
 			"INSERT OR IGNORE INTO member (id, user_id, organization_id, role, created_at) VALUES ('m-owner', 'owner', 'org', 'owner', 1)",
 		),
@@ -150,6 +157,19 @@ app.post("/fixture/session/:actor", async (c) => {
 })
 app.post("/fixture/change", async (c) => {
 	const { action, id, grants } = await c.req.json()
+	if (action === "demote_owner" || action === "restore_owner")
+		await c.env.DB.prepare("UPDATE member SET role=? WHERE user_id='owner'").bind(action === "demote_owner" ? "member" : "owner").run()
+	if (action === "demote_gateway_admin" || action === "restore_gateway_admin")
+		await c.env.DB.prepare("UPDATE member SET role=? WHERE user_id='gateway-admin'").bind(action === "demote_gateway_admin" ? "member" : "admin").run()
+	if (action === "slack_seed") {
+		await c.env.DB.prepare(`INSERT OR REPLACE INTO slack_workspace(team_id,org_id,bot_token_enc,bot_user_id,scopes,created_at,updated_at)
+			VALUES ('T1','org',?,'UBOT','groups:read,users:read,team:read',1,1)`).bind(await encryptToken("fictional-slack-token", c.env.ENCRYPTION_SECRET)).run()
+		await c.env.DB.prepare(`INSERT OR REPLACE INTO slack_workspace_member(team_id,slack_user_id,org_id,user_id,created_at,updated_at)
+			VALUES ('T1','UOWNER','org','gateway-admin',1,1)`).run()
+		setSlackFixture(true)
+	}
+	if (action === "slack_leave") setSlackFixture(false)
+	if (action === "slack_error") setSlackFixture(true, true)
 	if (action === "expire_preflight")
 		await c.env.DB.prepare("UPDATE external_memory_operation SET deadline_at=1 WHERE id=?").bind(id).run()
 	if (action === "claim_preflight")
@@ -263,10 +283,24 @@ const routes = createExternalRoutes((env, request) => ({
 		},
 	},
 	personalProvider: fakePersonalProvider,
+	sharedStore: sharedStore(env),
+	sharedProvider: fakeSharedProvider,
+	privateSearch: (input, principal, signal) => privateChannelSearch(env, input, principal, signal, {
+		slackFetch: fakeSlackFetch,
+		search: async (containerTag) => {
+			if (containerTag !== "slack_channel_CPRIVATE") throw new Error("Unauthorized fixture container")
+			return { results: [{ id: "fixture-private", memory: "Fictional ingested channel fact", similarity: 1, metadata: { memory_scope: "private_channel" } }] }
+		},
+	}),
 	personalSearch: (input, owner) => fakePersonalSearch(input, owner),
-	search: async (input) => {
+	search: async (input, signal) => {
 		providerCalls++
 		lastProviderRequest = sharedSearchRequest(input)
+		if (input.query.includes("vacation") || input.query.includes("shared journey")) {
+			const principal = await authenticate(env, request)
+			return { results: [...(await fakeSharedSearch(input, principal)).results,
+				...(input.recall === "historical" ? [{ id: "old-source", chunk: "Historical vacation policy: 20 days." }] : [])] }
+		}
 		if (
 			(lastProviderRequest as { containerTag: string }).containerTag !==
 			"sm_org_shared"

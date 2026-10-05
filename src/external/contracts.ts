@@ -5,12 +5,14 @@ export const GRANTS = [
 	"skills.org:read",
 	"memory.personal:read",
 	"memory.personal:write",
+	"memory.private-channel:read",
+	"memory.shared:write",
 ] as const
 export type Grant = (typeof GRANTS)[number]
 export const grantsSchema = z
 	.array(z.enum(GRANTS))
 	.min(1)
-	.max(4)
+	.max(6)
 	.refine((v) => new Set(v).size === v.length)
 export const topicTagSchema = z
 	.string()
@@ -22,6 +24,9 @@ export const searchSchema = z.strictObject({
 	query: z.string().trim().min(1).max(2000),
 	limit: z.number().int().min(1).max(20).default(5),
 	topicTags: z.array(topicTagSchema).max(10).optional(),
+	// A destination selector, never a caller-selected identity/container/filter.
+	scope: z.enum(["personal", "shared", "private_channel"]).optional(),
+	recall: z.enum(["current", "historical"]).optional(),
 })
 export const listSchema = z.strictObject({})
 export const loadSchema = z.strictObject({
@@ -41,12 +46,15 @@ const requestId = z.string().uuid()
 const provenance = {
 	eventDate: z.iso.date().optional(),
 }
+const target = { scope: z.enum(["personal", "shared"]).optional() }
 export const captureSchema = z.strictObject({
+	...target,
 	idempotencyKey: requestId,
 	content: durableContent,
 	...provenance,
 })
 export const correctSchema = z.strictObject({
+	...target,
 	idempotencyKey: requestId,
 	reference: z.string().uuid(),
 	content: durableContent,
@@ -55,10 +63,11 @@ export const correctSchema = z.strictObject({
 	...provenance,
 })
 export const retractSchema = z.strictObject({
+	...target,
 	idempotencyKey: requestId,
 	reference: z.string().uuid(),
 })
-export const statusSchema = z.strictObject({ idempotencyKey: requestId })
+export const statusSchema = z.strictObject({ idempotencyKey: requestId, ...target })
 export type WriteInput = z.infer<typeof captureSchema> & {
 	reference?: string
 	retention?: "durable" | "preserve"
@@ -67,10 +76,10 @@ export type RetractInput = z.infer<typeof retractSchema>
 export const mintSchema = z.strictObject({
 	label: z.string().trim().min(1).max(100),
 	grants: grantsSchema,
-	expiresInDays: z.number().int().min(1).max(90),
+	expiresInDays: z.number().int().min(1).max(365),
 	consent: z.literal(true),
 	// Omitted for backwards-compatible organization credentials.
-	kind: z.enum(["personal", "organization"]).default("organization"),
+	kind: z.enum(["personal", "organization", "employee"]).default("organization"),
 })
 export type SearchInput = z.infer<typeof searchSchema>
 export type SkillIndex = {
@@ -89,10 +98,12 @@ export type Principal = {
 	userId: string
 	orgId: string
 	grants: Grant[]
+	kind?: "employee"
 }
 export type MemoryResult = {
 	id: { kind: "memory" | "chunk"; value: string }
-	scope?: "shared" | "personal"
+	scope?: "shared" | "personal" | "private_channel"
+	recall?: "current" | "historical"
 	editable?: boolean
 	reference?: string
 	text: string

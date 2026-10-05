@@ -85,3 +85,32 @@ export const externalMemoryOperation = sqliteTable(
 		index("external_memory_operation_owner").on(t.orgId, t.userId, t.state),
 	],
 )
+
+// Shared reconciliation evidence belongs to the organization, not its issuer.
+// user_id is immutable actor provenance, deliberately NOT a user/credential FK.
+export const externalSharedOperation = sqliteTable("external_shared_operation", {
+	id: text("id").primaryKey(),
+	orgId: text("org_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+	userId: text("user_id").notNull(),
+	requestHash: text("request_hash").notNull(),
+	operation: text("operation").notNull(),
+	phase: text("phase").notNull(),
+	providerAction: text("provider_action"),
+	providerId: text("provider_id"),
+	targetFingerprint: text("target_fingerprint"),
+	deadlineAt: integer("deadline_at"),
+	dispatchedAt: integer("dispatched_at"),
+	reconciledAt: integer("reconciled_at"),
+	state: text("state").notNull(),
+	result: text("result"),
+	createdAt: integer("created_at").notNull(),
+}, (t) => [index("external_shared_operation_domain").on(t.orgId, t.state)])
+
+export const externalSharedReference = sqliteTable("external_shared_reference", {
+	id: text("id").primaryKey(),
+	orgId: text("org_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+	userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+	providerId: text("provider_id").notNull(),
+	fingerprint: text("fingerprint").notNull(),
+	createdAt: integer("created_at").notNull(),
+}, (t) => [index("external_shared_reference_owner").on(t.orgId, t.userId, t.createdAt)])

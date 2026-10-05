@@ -70,5 +70,14 @@ export const MIGRATIONS: ReadonlyArray<{
 			"ALTER TABLE `external_memory_operation` ADD `dispatched_at` integer;",
 			"ALTER TABLE `external_memory_operation` ADD `reconciled_at` integer;"
 		]
+	},
+	{
+		"name": "0005_first_eternals.sql",
+		"statements": [
+			"CREATE TABLE `external_shared_operation` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`request_hash` text NOT NULL,\n\t`operation` text NOT NULL,\n\t`phase` text NOT NULL,\n\t`provider_action` text,\n\t`provider_id` text,\n\t`target_fingerprint` text,\n\t`deadline_at` integer,\n\t`dispatched_at` integer,\n\t`reconciled_at` integer,\n\t`state` text NOT NULL,\n\t`result` text,\n\t`created_at` integer NOT NULL,\n\tFOREIGN KEY (`org_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade\n);",
+			"CREATE INDEX `external_shared_operation_domain` ON `external_shared_operation` (`org_id`,`state`);",
+			"CREATE TABLE `external_shared_reference` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`provider_id` text NOT NULL,\n\t`fingerprint` text NOT NULL,\n\t`created_at` integer NOT NULL,\n\tFOREIGN KEY (`org_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade\n);",
+			"CREATE INDEX `external_shared_reference_owner` ON `external_shared_reference` (`org_id`,`user_id`,`created_at`);"
+		]
 	}
 ]

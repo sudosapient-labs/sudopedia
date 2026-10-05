@@ -3,6 +3,7 @@ import { z } from "zod"
 
 const identifier = z.string().min(1).max(256)
 export const reconciliationSchema = z.strictObject({
+	scope: z.enum(["personal", "shared"]).optional(),
 	id: identifier,
 	orgId: identifier,
 	userId: identifier,
@@ -33,7 +34,7 @@ export function reconciliationStatement(value: Reconciliation, now = Date.now())
 		(input.phase === "preflight" && input.outcome !== "rejected"))
 		throw new ExternalError("invalid_input", 400, "Reconciliation evidence required")
 	return {
-		sql: `UPDATE external_memory_operation SET state = ?, result = ?, reconciled_at = ?
+		sql: `UPDATE ${input.scope === "shared" ? "external_shared_operation" : "external_memory_operation"} SET state = ?, result = ?, reconciled_at = ?
 		WHERE id = ? AND org_id = ? AND user_id = ? AND request_hash = ?
 		AND phase = ? AND provider_action IS ? AND provider_id IS ? AND target_fingerprint IS ?
 		AND state IN ('pending', 'unknown') AND reconciled_at IS NULL

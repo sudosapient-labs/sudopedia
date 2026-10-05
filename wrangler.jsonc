@@ -43,6 +43,9 @@
 	"vars": {
 		"PUBLIC_URL": "https://sudopedia.sudosapient.dev",
 		"EXTERNAL_PUBLIC_URL": "https://sudopedia.sudosapient.dev",
+		// Default-off creation gate: enable separately after backend/schema verification.
+		// Existing credentials and their exact permissions remain usable with this off.
+		"EXTERNAL_EMPLOYEE_CREATION_ENABLED": "off",
 		// "on" once the Workers Paid block below is enabled: sandbox tools then
 		// run on a Cloudflare container.
 		"CONTAINER_SANDBOX": "off",

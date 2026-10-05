@@ -7,10 +7,10 @@ import {
 	hashSecret,
 	listCredentials,
 	revokeCredential,
+	maxLifetimeDays,
 } from "../external/credentials"
 import { ExternalError, errorBody, publicError } from "../external/errors"
 import {
-	boundedSetting,
 	readJson,
 	jsonBytes,
 	MAX_BODY_BYTES,
@@ -43,7 +43,8 @@ async function credentialPage(c: Context<AppContext>, cursor?: z.infer<typeof cu
 		credentials: [] as typeof rows,
 		nextCursor: null as z.infer<typeof cursorSchema> | null,
 		mcpUrl: `${canonicalOrigin(c.env)}/mcp`,
-		maxLifetimeDays: boundedSetting(c.env.EXTERNAL_MAX_LIFETIME_DAYS, 30, 1, 90),
+		maxLifetimeDays: maxLifetimeDays(),
+		employeeConnectionsEnabled: c.env.EXTERNAL_EMPLOYEE_CREATION_ENABLED === "on",
 	}
 	for (const row of remaining.slice(0, 50)) {
 		const candidate = { ...listing, credentials: [...listing.credentials, row], nextCursor: { id: row.id, asOf, version } }

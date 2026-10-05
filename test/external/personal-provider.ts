@@ -34,13 +34,17 @@ export const personalRows: Row[] = [
 	},
 ]
 export let personalMutations = 0
-export const fakePersonalProvider: PersonalProvider = {
+export const fakePersonalProvider = fakeMemoryProvider("personal")
+export const fakeSharedProvider = fakeMemoryProvider("shared")
+function fakeMemoryProvider(scope: "personal" | "shared"): PersonalProvider {
+	const target = (owner: Principal) => scope === "shared" ? `shared:${owner.orgId}` : owner.userId
+	return {
 	async find(owner, id) {
 		return (
 			personalRows.find(
 				(r) =>
 					r.id === id &&
-					r.owner === owner.userId &&
+					r.owner === target(owner) &&
 					!r.isForgotten &&
 					r.isLatest !== false,
 			) ?? null
@@ -64,7 +68,7 @@ export const fakePersonalProvider: PersonalProvider = {
 			})
 		}
 		const current = personalRows.find(
-			(r) => r.id === id && r.owner === owner.userId,
+			(r) => r.id === id && r.owner === target(owner),
 		)
 		if (
 			operation !== "capture" &&
@@ -77,7 +81,7 @@ export const fakePersonalProvider: PersonalProvider = {
 				operation === "capture" &&
 				personalRows.some(
 					(r) =>
-						r.owner === owner.userId &&
+						r.owner === target(owner) &&
 						!r.isForgotten &&
 						r.isLatest !== false &&
 						r.memory === (input as { content: string }).content,
@@ -87,14 +91,16 @@ export const fakePersonalProvider: PersonalProvider = {
 			if (current) current.isLatest = false
 			personalRows.push({
 				id: crypto.randomUUID(),
-				owner: owner.userId,
+				owner: target(owner),
 				memory: (input as { content: string }).content,
 				updatedAt: new Date().toISOString(),
 				forgetAfter: operation === "correct" && "retention" in input &&
 					input.retention === "preserve" ? current?.forgetAfter : null,
 				metadata: {
 					...(operation === "correct" ? context.current?.metadata : {}),
-					memory_scope: "personal",
+					memory_scope: scope,
+					external_actor: owner.userId,
+					external_org: owner.orgId,
 					source_type: "external-primary-bot",
 					external_operation: operationId,
 				},
@@ -102,6 +108,7 @@ export const fakePersonalProvider: PersonalProvider = {
 		}
 		return { status: "applied" }
 	},
+}
 }
 export async function fakePersonalSearch(input: SearchInput, owner: Principal) {
 	return {
@@ -120,4 +127,8 @@ export async function fakePersonalSearch(input: SearchInput, owner: Principal) {
 			.slice(0, input.limit)
 			.map((r) => ({ ...r, similarity: 0.92 })),
 	}
+}
+
+export async function fakeSharedSearch(input: SearchInput, owner: Principal) {
+	return fakePersonalSearch(input, { ...owner, userId: `shared:${owner.orgId}` })
 }

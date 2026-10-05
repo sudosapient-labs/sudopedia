@@ -6,7 +6,7 @@ import { Input } from "@ui/components/input"
 type Credential = {
 	id: string
 	label: string
-	kind: "personal" | "organization"
+	kind: "personal" | "organization" | "employee"
 	grants: string[]
 	expiresAt: number
 	revokedAt: number | null
@@ -15,6 +15,7 @@ type Listing = {
 	credentials: Credential[]
 	mcpUrl: string
 	maxLifetimeDays: number
+	employeeConnectionsEnabled: boolean
 	nextCursor?: { id: string; asOf: number; version: string } | null
 }
 const personalGrants = [
@@ -22,15 +23,23 @@ const personalGrants = [
 	"memory.personal:read",
 	"memory.personal:write",
 ]
-const organizationGrants = ["memory.shared:read", "skills.org:read"]
+const ordinaryGrants = [...personalGrants, "memory.private-channel:read"]
+const privilegedGrants = ["memory.shared:write", "skills.org:read"]
+const grantLabels: Record<string, string> = {
+	"memory.shared:read": "Read shared company knowledge",
+	"memory.personal:read": "Read own personal memory",
+	"memory.personal:write": "Write own personal memory",
+	"memory.private-channel:read": "Read permitted private-channel knowledge",
+	"memory.shared:write": "Write shared company memory (owner/admin only)",
+	"skills.org:read": "Read organization skills (owner/admin only)",
+}
 
 export default function ExternalAccess() {
 	const { isAdmin, org, user } = useAuth()
 	const generation = useRef(0)
 	const listingRequest = useRef(0)
 	const loading = useRef(false)
-	const [kind, setKind] = useState<"personal" | "organization">("personal")
-	const grants = kind === "personal" ? personalGrants : organizationGrants
+	const grants = isAdmin ? [...ordinaryGrants, ...privilegedGrants] : ordinaryGrants
 	const [listing, setListing] = useState<Listing | null>(null)
 	const [label, setLabel] = useState("")
 	const [days, setDays] = useState(7)
@@ -83,7 +92,6 @@ export default function ExternalAccess() {
 		setSecret(null)
 		setListing(null)
 		setConsent(false)
-		setKind("personal")
 		setSelected([...personalGrants])
 		setBusy(false)
 		loading.current = false
@@ -139,8 +147,12 @@ export default function ExternalAccess() {
 				Your primary bot can receive permitted company and personal knowledge
 				and, with your personal-write consent, persist new facts, change
 				preferences and retract incorrect memories in your personal brain. It
-				cannot write shared knowledge, access private channels or another
-				employee’s memory, or run actions. Revocation stops future operations;
+				can read ingested private-channel knowledge only with your grant and
+				verified current Slack membership. Owners/admins may additionally grant
+				shared writes and organization-skill reads on this same connection.
+				Personal is the default: shared writes must be explicitly directed to
+				company memory, even in a DM. It cannot access another employee’s
+				personal memory or run actions. Revocation stops future operations;
 				downloaded context cannot be recalled.
 			</p>
 			<p>
@@ -182,12 +194,13 @@ export default function ExternalAccess() {
 					</Button>
 				</div>
 			)}
-			<form
+			{listing && !listing.employeeConnectionsEnabled && <p>New employee connections are not enabled yet. Existing credentials remain manageable.</p>}
+			{listing?.employeeConnectionsEnabled && <form
 				className="space-y-4"
 				onSubmit={(event) => {
 					event.preventDefault()
 					void mutate(endpoint, {
-						kind,
+						kind: "employee",
 						label,
 						grants: selected,
 						expiresInDays: days,
@@ -195,32 +208,6 @@ export default function ExternalAccess() {
 					})
 				}}
 			>
-				<label className="block">
-					Integration type
-					<select
-						aria-label="Integration type"
-						value={kind}
-						onChange={(event) => {
-							const next = event.target.value as "personal" | "organization"
-							setKind(next)
-							setSelected(
-								next === "personal"
-									? [...personalGrants]
-									: [...organizationGrants],
-							)
-							setConsent(false)
-							setSecret(null)
-						}}
-						className="block rounded bg-[#17191E] p-2"
-					>
-						<option value="personal">My personal primary bot</option>
-						{isAdmin && (
-							<option value="organization">
-								Organization integration (admin-only)
-							</option>
-						)}
-					</select>
-				</label>
 				<label className="block">
 					Integration label
 					<Input
@@ -232,32 +219,34 @@ export default function ExternalAccess() {
 					/>
 				</label>
 				<label className="block">
-					Expires in days (maximum {listing?.maxLifetimeDays ?? 30})
+					Expires in days (maximum {listing?.maxLifetimeDays ?? 365})
 					<Input
 						type="number"
 						min={1}
-						max={listing?.maxLifetimeDays ?? 30}
+						max={listing?.maxLifetimeDays ?? 365}
 						value={days}
 						onChange={(e) => setDays(Number(e.target.value))}
 						required
 					/>
 				</label>
-				<fieldset>
+				<fieldset disabled={busy}>
 					<legend>Explicit read/write grants</legend>
 					{grants.map((grant) => (
 						<label key={grant} className="mr-5 inline-flex items-center gap-2">
 							<input
 								type="checkbox"
+								aria-label={grant}
 								checked={selected.includes(grant)}
-								onChange={(e) =>
+								onChange={(e) => {
+									setConsent(false)
 									setSelected((current) =>
 										e.target.checked
 											? [...current, grant]
 											: current.filter((g) => g !== grant),
 									)
-								}
+								}}
 							/>
-							{grant}
+							{grantLabels[grant]}
 						</label>
 					))}
 				</fieldset>
@@ -268,9 +257,12 @@ export default function ExternalAccess() {
 						required
 						onChange={(e) => setConsent(e.target.checked)}
 					/>
-					{kind === "personal"
-						? "I authorize this bot/provider to receive the selected shared/personal knowledge and, when personal-write is selected, persist captures, corrections and retractions in MY personal memory without a Slack approval for each routine write."
-						: "I authorize shared-company knowledge and organization-procedure disclosure to this external agent/provider."}
+					I authorize this employee-owned bot/provider to receive the selected
+					knowledge and perform selected personal writes without a Slack approval
+					for each routine write. If I select shared-write access, I also authorize
+					explicitly directed company-memory captures, corrections and retractions;
+					this does not authorize publishing all conversation content. Skill
+					access retrieves instructions, not permission to execute them.
 				</label>
 				<Button
 					type="submit"
@@ -278,7 +270,7 @@ export default function ExternalAccess() {
 				>
 					Create credential
 				</Button>
-			</form>
+			</form>}
 			<ul className="space-y-3">
 				{listing?.credentials.map((credential) => (
 					<li
@@ -288,7 +280,9 @@ export default function ExternalAccess() {
 						<div>
 							<p>
 								{credential.label} ·{" "}
-								{credential.kind === "personal"
+								{credential.kind === "employee"
+									? "Employee bot connection"
+									: credential.kind === "personal"
 									? "Personal integration"
 									: "Organization integration"}
 							</p>

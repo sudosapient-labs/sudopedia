@@ -2,6 +2,10 @@ import { grantsSchema, type Grant, type Principal } from "./contracts"
 import { ExternalError } from "./errors"
 import { boundedSetting } from "./limits"
 
+export const privilegedGrant = (grant: Grant) =>
+	grant === "memory.shared:write" || grant === "skills.org:read"
+export const maxLifetimeDays = () => 365
+
 export async function hashSecret(secret: string): Promise<string> {
 	const digest = await crypto.subtle.digest(
 		"SHA-256",
@@ -60,6 +64,9 @@ export function resolveCredential(
 	}
 	const grants = grantsSchema.safeParse(parsed)
 	if (!grants.success) return deny()
+	// Legacy credentials cannot acquire additive grants by accident.
+	if (row.kind !== "employee" && grants.data.some((g) =>
+		g === "memory.shared:write" || g === "memory.private-channel:read")) return deny()
 	if (row.kind === "personal" && grants.data.includes("skills.org:read"))
 		return deny()
 	if (
@@ -67,7 +74,7 @@ export function resolveCredential(
 		grants.data.some((g) => g.startsWith("memory.personal:"))
 	)
 		return deny()
-	if (row.kind !== "personal" && row.kind !== "organization") return deny()
+	if (!["personal", "organization", "employee"].includes(row.kind)) return deny()
 	if (
 		row.kind === "organization" &&
 		row.role !== "owner" &&
@@ -78,7 +85,9 @@ export function resolveCredential(
 		credentialId: row.id,
 		userId: row.user_id,
 		orgId: row.org_id,
-		grants: grants.data,
+		grants: row.kind === "employee" && !["owner", "admin"].includes(row.role)
+			? grants.data.filter((g) => !privilegedGrant(g)) : grants.data,
+		...(row.kind === "employee" ? { kind: "employee" as const } : {}),
 	}
 }
 
@@ -124,11 +133,19 @@ export async function mintCredential(
 		label: string
 		grants: Grant[]
 		expiresInDays: number
-		kind?: "personal" | "organization"
+		kind?: "personal" | "organization" | "employee"
 	},
 ) {
 	const kind = input.kind ?? "organization"
+	if (kind === "employee" && env.EXTERNAL_EMPLOYEE_CREATION_ENABLED !== "on")
+		throw new ExternalError("not_configured", 503, "Employee connection creation is not enabled")
+	if (!grantsSchema.safeParse(input.grants).success ||
+		!["personal", "organization", "employee"].includes(kind) ||
+		!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > 365)
+		throw new ExternalError("invalid_input", 400, "Invalid credential policy")
 	if (
+		(kind !== "employee" && input.grants.some((g) =>
+			g === "memory.shared:write" || g === "memory.private-channel:read")) ||
 		(kind === "personal" && input.grants.includes("skills.org:read")) ||
 		(kind === "organization" &&
 			input.grants.some((g) => g.startsWith("memory.personal:")))
@@ -146,14 +163,15 @@ export async function mintCredential(
 		.first<{ role: string }>()
 	if (
 		!member ||
-		(kind === "organization" && !["owner", "admin"].includes(member.role))
+		((kind === "organization" || input.grants.some(privilegedGrant)) &&
+			!["owner", "admin"].includes(member.role))
 	)
 		throw new ExternalError(
 			"forbidden",
 			403,
 			"Organization integrations require owner/admin access",
 		)
-	const maxDays = boundedSetting(env.EXTERNAL_MAX_LIFETIME_DAYS, 30, 1, 90)
+	const maxDays = maxLifetimeDays()
 	if (input.expiresInDays > maxDays)
 		throw new ExternalError(
 			"invalid_input",
@@ -167,30 +185,31 @@ export async function mintCredential(
 	const expiresAt = now + input.expiresInDays * 86400000
 	// Scope capacity/history to the actor's personal bucket, or the admin-only
 	// organization bucket. Inactive credentials never spend active capacity.
-	const activeLimit = kind === "personal" ? 5 : 100
-	const historyLimit = kind === "personal" ? 100 : 200
+	const activeLimit = kind !== "organization" ? 5 : 100
+	const historyLimit = kind !== "organization" ? 100 : 200
+	const bucket = kind === "organization" ? "kind = 'organization'" : "kind IN ('personal', 'employee')"
 	await env.DB.prepare(
-		`DELETE FROM external_credential WHERE org_id = ? AND kind = ?
+		`DELETE FROM external_credential WHERE org_id = ? AND ${bucket}
 		AND (? = 'organization' OR user_id = ?) AND (expires_at < ? OR revoked_at < ?)`,
 	)
-		.bind(actor.orgId, kind, kind, actor.userId, now - 30 * 86400000, now - 30 * 86400000)
+		.bind(actor.orgId, kind, actor.userId, now - 30 * 86400000, now - 30 * 86400000)
 		.run()
 	await env.DB.prepare(
 		`DELETE FROM external_credential WHERE id IN (
-		SELECT id FROM external_credential WHERE org_id = ? AND kind = ?
+		SELECT id FROM external_credential WHERE org_id = ? AND ${bucket}
 		AND (? = 'organization' OR user_id = ?) AND (expires_at <= ? OR revoked_at IS NOT NULL)
 		ORDER BY created_at, id LIMIT MAX(0, (SELECT COUNT(*) FROM external_credential
-		WHERE org_id = ? AND kind = ? AND (? = 'organization' OR user_id = ?)) - ?))`,
-	).bind(actor.orgId, kind, kind, actor.userId, now,
-		actor.orgId, kind, kind, actor.userId, historyLimit - 1).run()
+		WHERE org_id = ? AND ${bucket} AND (? = 'organization' OR user_id = ?)) - ?))`,
+	).bind(actor.orgId, kind, actor.userId, now,
+		actor.orgId, kind, actor.userId, historyLimit - 1).run()
 	const row = await env.DB.prepare(
 		`INSERT INTO external_credential
 		(id, org_id, user_id, member_id, label, secret_hash, grants, created_at, expires_at, kind)
 		SELECT ?, ?, ?, m.id, ?, ?, ?, ?, ?, ? FROM member m JOIN user u ON u.id = m.user_id
-		WHERE m.user_id = ? AND m.organization_id = ? AND (? = 'personal' OR m.role IN ('owner', 'admin')) AND u.deleted = 0
-		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		WHERE m.user_id = ? AND m.organization_id = ? AND (? = 0 OR m.role IN ('owner', 'admin')) AND u.deleted = 0
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND ${bucket}
 		AND (? = 'organization' OR user_id = ?) AND revoked_at IS NULL AND expires_at > ?) < ?
-		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND kind = ?
+		AND (SELECT COUNT(*) FROM external_credential WHERE org_id = ? AND ${bucket}
 		AND (? = 'organization' OR user_id = ?)) < ?
 		RETURNING id`,
 	)
@@ -206,17 +225,17 @@ export async function mintCredential(
 			kind,
 			actor.userId,
 			actor.orgId,
-			kind,
+			Number(kind === "organization" || input.grants.some(privilegedGrant)),
 			actor.orgId,
-			kind, kind, actor.userId, now, activeLimit,
-			actor.orgId, kind, kind, actor.userId, historyLimit,
+			kind, actor.userId, now, activeLimit,
+			actor.orgId, kind, actor.userId, historyLimit,
 		)
 		.first()
 	if (!row)
 		throw new ExternalError(
 			"credential_limit",
 			429,
-			kind === "personal" ? "Personal credential limit reached (5 active)" :
+			kind !== "organization" ? "Employee credential limit reached (5 active)" :
 				"Organization credential limit reached (100 active)",
 		)
 	return { id, secret, expiresAt }
@@ -232,14 +251,14 @@ export async function listCredentials(
 	const result = await env.DB.prepare(
 		`SELECT id, label, kind, user_id AS issuerId, grants, created_at AS createdAt,
 		expires_at AS expiresAt, revoked_at AS revokedAt FROM external_credential WHERE org_id = ?
-		AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))
-		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind = 'personal') DESC, created_at DESC, id DESC LIMIT 300`,
+		AND ((kind IN ('personal', 'employee') AND user_id = ?) OR (kind = 'organization' AND ? = 1))
+		ORDER BY (revoked_at IS NULL AND expires_at > ?) DESC, (kind IN ('personal', 'employee')) DESC, created_at DESC, id DESC LIMIT 300`,
 	)
 		.bind(orgId, userId, Number(admin), asOf)
 		.all<{
 			id: string
 			label: string
-			kind: "personal" | "organization"
+			kind: "personal" | "organization" | "employee"
 			issuerId: string
 			grants: string
 			createdAt: number
@@ -260,7 +279,7 @@ export async function revokeCredential(
 	admin: boolean,
 ): Promise<void> {
 	await env.DB.prepare(
-		"UPDATE external_credential SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND org_id = ? AND ((kind = 'personal' AND user_id = ?) OR (kind = 'organization' AND ? = 1))",
+		"UPDATE external_credential SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND org_id = ? AND ((kind IN ('personal', 'employee') AND user_id = ?) OR (kind = 'organization' AND ? = 1))",
 	)
 		.bind(Date.now(), id, orgId, userId, Number(admin))
 		.run()
