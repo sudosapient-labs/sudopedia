@@ -318,16 +318,21 @@ and journals are organization-bound; this is NOT provider-level multi-tenant iso
 See [gateway v2 implementation handoff](../employee-bot-memory-v2.md) for the
 requirement-to-code/test map, local verification record, readiness verdicts and
 staged rollout. All implementation verification uses fictional memory/Slack data.
-No deployment, remote migration, real company-memory access or live-provider write
-is authorized or performed by this work.
+The implementation and audit used no real company-memory access or live-provider
+writes. Production deployment and creation enablement were subsequently authorized
+on 2026-10-05; this does not constitute named-client or live-provider validation.
 
-`EXTERNAL_EMPLOYEE_CREATION_ENABLED` defaults to off in committed production config.
+`EXTERNAL_EMPLOYEE_CREATION_ENABLED` is on in the authorized production config.
 Only "on" enables new employee creation and exposes its form; existing credential
 management/authentication continue with it off. Deploy compatible schema/backend
 with this off, verify, then obtain explicit authorization before enabling controls.
 The gate is not a kill switch for already-minted permissions.
 
-Production remains deliberately rolled back to Worker
-`56bf1536-fa2e-4737-820b-0e280b012f3e`; D1 0002–0004 remain applied. The merged Git
-foundation is not reverted. Any deployment, migration, enablement or live validation
-requires separate explicit authorization.
+Before enablement, the live deployment already contained the merged PR #4 changes
+with creation off, and D1 migrations 0000–0005 were recorded as applied (including
+both shared tables/indexes). A restricted D1 export and Time Travel bookmark were
+captured; live health/frontend and unauthenticated HTTP/MCP/management denials were
+verified. No migration was rerun and no existing credential was changed. Authenticated
+creation and real Slack/provider journeys still need a consenting-user canary.
+Further live-memory tests and any later rollback require separate authorization;
+do not revert to a pre-v2 writer that cannot honor shared mutation locks.
