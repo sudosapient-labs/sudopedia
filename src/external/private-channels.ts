@@ -16,11 +16,30 @@ const identitySchema = z.object({
 	team_id: slackId, slack_user_id: slackId, bot_token_enc: z.string().min(1),
 	bot_user_id: slackId.nullable(), scopes: z.string().nullable(),
 })
+// Validate the fields consumed by private recall. The SDK only parses JSON; its
+// TypeScript response types are not runtime validation. Memories-only searches
+// must not silently drop malformed rows or accept historical chunk results.
+const privateMemorySchema = z.object({
+	id: z.string().min(1).max(200), memory: z.string(),
+	similarity: z.number().finite(),
+	metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+	updatedAt: z.string().optional(), chunk: z.never().optional(),
+})
+function privateRequestBudget() {
+	// Stay below the Free-plan 50 external-subrequest ceiling, leaving room for
+	// shared/personal recall and transport overhead. No retries in either path.
+	let remaining = 40
+	return (count = 1) => {
+		if (count > remaining) throw incomplete()
+		remaining -= count
+	}
+}
 
 /** Strict live Slack reads only. No retry, cache, partial-on-error or Slack writes. */
 export async function livePrivateChannels(token: string,
 	identity: { teamId: string; slackUserId: string; botUserId: string | null; scopes: string | null },
-	requestSignal: AbortSignal, fetcher: typeof fetch = fetch): Promise<string[]> {
+	requestSignal: AbortSignal, fetcher: typeof fetch = fetch,
+	consumeRequest = privateRequestBudget()): Promise<string[]> {
 	const controller = new AbortController()
 	const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(8000), controller.signal])
 	try {
@@ -32,6 +51,7 @@ export async function livePrivateChannels(token: string,
 			signal.throwIfAborted()
 			const url = new URL(`https://slack.com/api/${method}`)
 			for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
+			consumeRequest()
 			const response = await fetcher(url, { headers: { authorization: `Bearer ${token}` }, signal })
 			if (!response.ok || !response.body) throw unavailable()
 			const reader = response.body.getReader()
@@ -110,6 +130,7 @@ export async function privateChannelSearch(env: Env, input: SearchInput,
 	const controller = new AbortController()
 	const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(8000), controller.signal])
 	try {
+		const consumeRequest = privateRequestBudget()
 		// Require exactly one active identity; do not guess a workspace or email-match.
 		const rows = await env.DB.prepare(`SELECT w.team_id, w.bot_token_enc, w.bot_user_id, w.scopes, s.slack_user_id
 			FROM slack_workspace w JOIN slack_workspace_member s ON s.team_id=w.team_id AND s.org_id=w.org_id
@@ -121,8 +142,12 @@ export async function privateChannelSearch(env: Env, input: SearchInput,
 		const identity = identitySchema.parse(rows.results[0])
 		const token = await decryptToken(identity.bot_token_enc, env.ENCRYPTION_SECRET)
 		const channels = await livePrivateChannels(token, { teamId: identity.team_id,
-			slackUserId: identity.slack_user_id, botUserId: identity.bot_user_id, scopes: identity.scopes }, signal, adapters?.slackFetch)
-		const queue = [...channels], results: unknown[] = []
+			slackUserId: identity.slack_user_id, botUserId: identity.bot_user_id, scopes: identity.scopes }, signal, adapters?.slackFetch, consumeRequest)
+		// Reserve every permitted channel search before dispatching any of them.
+		// Exhaustion must deny coverage, not return a partial/empty success.
+		consumeRequest(channels.length)
+		const responseSchema = z.object({ results: z.array(privateMemorySchema).max(input.limit) })
+		const queue = [...channels], results: z.infer<typeof privateMemorySchema>[] = []
 		await Promise.all(Array.from({ length: 2 }, async () => {
 			while (queue.length) {
 				signal.throwIfAborted()
@@ -132,13 +157,12 @@ export async function privateChannelSearch(env: Env, input: SearchInput,
 					...sharedSearchRequest(input), containerTag,
 					searchMode: "memories",
 				}, { signal, timeout: 8000, maxRetries: 0 })
-				results.push(...response.results)
+				results.push(...responseSchema.parse(response).results)
 			}
 		}))
 		signal.throwIfAborted()
 		// Rank before the global projection. Never allocate private edit references.
-		results.sort((a, b) => ((b as { similarity?: number }).similarity ?? 0) -
-			((a as { similarity?: number }).similarity ?? 0))
+		results.sort((a, b) => b.similarity - a.similarity)
 		return { results: results.slice(0, input.limit), truncated: results.length > input.limit }
 	} catch (error) {
 		controller.abort()

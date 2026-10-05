@@ -289,7 +289,7 @@ const routes = createExternalRoutes((env, request) => ({
 		slackFetch: fakeSlackFetch,
 		search: async (containerTag) => {
 			if (containerTag !== "slack_channel_CPRIVATE") throw new Error("Unauthorized fixture container")
-			return { results: [{ id: "fixture-private", memory: "Fictional ingested channel fact", metadata: { memory_scope: "private_channel" } }] }
+			return { results: [{ id: "fixture-private", memory: "Fictional ingested channel fact", similarity: 1, metadata: { memory_scope: "private_channel" } }] }
 		},
 	}),
 	personalSearch: (input, owner) => fakePersonalSearch(input, owner),

@@ -125,6 +125,14 @@ session check. Component UI evidence is separate from Worker correctness and mod
 client behavior. No production
 credential screenshots or real employee data were captured.
 
+PR #4 audit follow-up (2026-10-05): added runtime validation of private provider
+responses before aggregation, SDK-wire regressions for malformed-only/mixed
+responses and sibling cancellation, and a combined 40-call Slack/provider budget
+with all permitted searches reserved before dispatch. The updated verification
+passed `bun run test` (244 tests / 28 files), all 27 local Worker groups,
+`bun run check-types`, the dry-run `bun run build`, and `git diff --check`.
+No production deployment, remote migration or live provider/Slack access occurred.
+
 ## Separate readiness verdicts
 
 Gateway correctness: locally verified for the implemented contracts, scope/permission
@@ -156,6 +164,13 @@ No OAuth expansion or arbitrary actions are included.
   three discovery pages and five membership pages/channel. Missing scopes/mapping,
   larger/incomplete coverage, API/rate-limit errors and deadlines deny the search;
   this is not a complete inventory of indexed private history.
+  Slack verification and provider searches additionally share a 40-outbound-call
+  budget; paginated memberships can exhaust it below those caps. All permitted
+  channel searches are reserved before dispatch, so exhaustion denies the whole
+  search with `private_access_incomplete`, leaving external-subrequest headroom.
+  Private provider rows are runtime-validated before aggregation; malformed-only
+  or mixed valid/invalid responses deny recall with `private_access_unverified`
+  and cancel outstanding siblings rather than reporting empty/partial success.
 - Granting private read to a credential makes unscoped search fail closed if that
   verification is unavailable. Clients can explicitly search shared/personal scope
   independently; do not interpret a failed combined search as “nothing found.”

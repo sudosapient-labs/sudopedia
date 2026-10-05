@@ -177,9 +177,17 @@ Discovery is bounded to three 200-channel pages and at most 20 private channels.
 Membership checks have at most five 200-member pages per channel, ending early on
 positive membership evidence. Two concurrent checks and two concurrent channel
 searches share an eight-second cancellation/deadline. No retries/caches.
+Slack verification and private provider searches share a 40-outbound-call budget,
+leaving headroom under the Free-plan external-subrequest ceiling for shared/personal
+recall. All permitted-channel searches are reserved before any are dispatched;
+large/paginated memberships can exhaust this budget below the channel/page caps.
+Each provider response must contain a bounded array of valid memory entries
+(string ID/content and finite similarity); malformed rows, including a mixture
+of valid/invalid rows or historical chunks, deny the entire private search and
+cancel outstanding sibling work instead of silently dropping entries.
 Malformed/oversized responses, Slack/provider errors, missing scopes and unverified
 access return sanitized `private_access_unverified` (503); exhausted/repeated
-pagination or the channel cap returns `private_access_incomplete` (503). No partial
+pagination, the channel cap or the outbound-call budget returns `private_access_incomplete` (503). No partial
 results are represented as a complete empty search. An explicit shared/personal
 scope can still be searched independently if private verification is unavailable.
 A verified non-member channel supplies no knowledge on subsequent calls.
