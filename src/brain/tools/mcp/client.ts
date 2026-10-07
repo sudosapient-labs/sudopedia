@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker"
 import { decryptToken } from "@/lib/crypto"
@@ -20,6 +21,7 @@ export async function connectMcpClient(
 	env: Env,
 	connection: McpConnectionRow,
 	callbackUrl: string,
+	options?: { signal: AbortSignal; timeoutMs: number },
 ): Promise<McpClientHandle> {
 	if (!connection.serverUrl) {
 		throw new Error(
@@ -29,9 +31,12 @@ export async function connectMcpClient(
 	const url = new URL(connection.serverUrl)
 
 	// Only custom URLs need SSRF validation, but every server needs the timeout.
-	const mcpFetch = getCatalogEntry(connection.serverSlug)
+	const baseFetch = getCatalogEntry(connection.serverSlug)
 		? withMcpFetchTimeout()
 		: withMcpFetchTimeout(createCustomMcpFetch(env))
+	const mcpFetch: FetchLike = options ? (url, init) => baseFetch(url, {
+		...init, signal: init?.signal ? AbortSignal.any([init.signal, options.signal]) : options.signal,
+	}) : baseFetch
 
 	let transport: StreamableHTTPClientTransport
 	if (connection.authType === "oauth") {
@@ -73,7 +78,7 @@ export async function connectMcpClient(
 			jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
 		},
 	)
-	await client.connect(transport)
+	await client.connect(transport, options ? { signal: options.signal, timeout: options.timeoutMs } : undefined)
 
 	return {
 		client,

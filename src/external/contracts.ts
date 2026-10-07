@@ -29,6 +29,14 @@ export const searchSchema = z.strictObject({
 	recall: z.enum(["current", "historical"]).optional(),
 })
 export const listSchema = z.strictObject({})
+export const knowledgeSchema = z.strictObject({
+	query: z.string().trim().min(1).max(2000),
+	limit: z.number().int().min(1).max(20).default(10),
+	recall: z.enum(["current", "historical"]).default("current"),
+	sourcePage: z.number().int().min(0).max(1000).default(0),
+})
+export const sourceStatusSchema = z.strictObject({ sourcePage: z.number().int().min(0).max(1000).default(0) })
+export type KnowledgeInput = z.infer<typeof knowledgeSchema>
 export const loadSchema = z.strictObject({
 	id: z.string().uuid(),
 	expectedVersion: z.number().int().positive().optional(),

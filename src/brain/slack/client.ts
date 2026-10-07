@@ -1663,6 +1663,7 @@ export async function getSlackChannelHistoryPage(
 		latest: string
 		cursor?: string
 		limit?: number
+		signal?: AbortSignal
 	},
 ): Promise<SlackCursorPage<SlackThreadMessage>> {
 	try {
@@ -1675,6 +1676,7 @@ export async function getSlackChannelHistoryPage(
 		if (opts.cursor) url.searchParams.set("cursor", opts.cursor)
 		const response = await fetch(url, {
 			headers: { authorization: `Bearer ${botToken}` },
+			signal: opts.signal ?? AbortSignal.timeout(8000),
 		})
 		const data = (await response.json().catch(() => ({}))) as {
 			ok?: boolean
@@ -1712,7 +1714,7 @@ export async function getSlackThreadHistoryPage(
 	botToken: string,
 	channel: string,
 	threadTs: string,
-	opts: { cursor?: string; limit?: number } = {},
+	opts: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
 ): Promise<SlackCursorPage<SlackThreadMessage>> {
 	try {
 		const url = new URL(`${SLACK_API}/conversations.replies`)
@@ -1722,6 +1724,7 @@ export async function getSlackThreadHistoryPage(
 		if (opts.cursor) url.searchParams.set("cursor", opts.cursor)
 		const response = await fetch(url, {
 			headers: { authorization: `Bearer ${botToken}` },
+			signal: opts.signal ?? AbortSignal.timeout(8000),
 		})
 		const data = (await response.json().catch(() => ({}))) as {
 			ok?: boolean

@@ -17,6 +17,7 @@
 		"enable_ctx_exports"
 	],
 	"minify": true,
+	"triggers": { "crons": ["*/5 * * * *"] },
 	// Preserve dashboard-configured variables across code deployments. Custom
 	// model inputs are declared in .dev.vars.example as secrets, not blank vars
 	// here, so committed defaults cannot overwrite the deployment's endpoint.
