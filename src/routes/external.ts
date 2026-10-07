@@ -81,6 +81,12 @@ export function createExternalRoutes(
 	routes.get("/brain/external/v1/skills", async (c) =>
 		c.json(await execute(factory(c.env, c.req.raw), "list", {})),
 	)
+	routes.post("/brain/external/v1/knowledge/query", async (c) =>
+		c.json(await execute(factory(c.env, c.req.raw), "knowledge", await readJson(c.req.raw), c.req.raw.signal)),
+	)
+	routes.get("/brain/external/v1/knowledge/sources", async (c) =>
+		c.json(await execute(factory(c.env, c.req.raw), "sources", { sourcePage: Number(c.req.query("sourcePage") ?? 0) }, c.req.raw.signal)),
+	)
 	for (const operation of [
 		"capture",
 		"correct",

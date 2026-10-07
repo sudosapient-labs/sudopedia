@@ -13,6 +13,9 @@ import {
 	correctSchema,
 	retractSchema,
 	statusSchema,
+	knowledgeSchema,
+	sourceStatusSchema,
+	type KnowledgeInput,
 	type WriteInput,
 	type RetractInput,
 } from "./contracts"
@@ -28,7 +31,7 @@ import {
 } from "./personal"
 
 export type Operation =
-	"search" | "list" | "load" | "capture" | "correct" | "retract" | "status"
+	"search" | "list" | "load" | "capture" | "correct" | "retract" | "status" | "knowledge" | "sources"
 export type ExternalDependencies = {
 	authenticate: () => Promise<Principal>
 	quota: (principal: Principal, operation: Operation) => Promise<void>
@@ -43,6 +46,7 @@ export type ExternalDependencies = {
 	sharedStore?: PersonalStore
 	sharedProvider?: PersonalProvider
 	privateSearch?: (input: SearchInput, principal: Principal, signal: AbortSignal) => Promise<unknown>
+	knowledge?: (input: KnowledgeInput | null, principal: Principal, signal: AbortSignal, sourcePage?: number) => Promise<unknown>
 	listSkills: (orgId: string) => Promise<SkillIndex[]>
 	loadSkill: (
 		orgId: string,
@@ -254,7 +258,7 @@ export async function execute(
 	let resultCount = 0
 	try {
 		principal = await deps.authenticate()
-		if (operation === "search") {
+		if (["search", "knowledge", "sources"].includes(operation)) {
 			if (
 				!principal.grants.some(
 					(g) => g === "memory.shared:read" || g === "memory.personal:read" || g === "memory.private-channel:read",
@@ -268,7 +272,11 @@ export async function execute(
 		} else if (["list", "load"].includes(operation))
 			requireGrant(principal, "skills.org:read")
 		const parsed =
-			operation === "search"
+			operation === "sources"
+				? parseInput(sourceStatusSchema, input)
+				: operation === "knowledge"
+				? parseInput(knowledgeSchema, input)
+				: operation === "search"
 				? parseInput(searchSchema, input)
 				: operation === "load"
 					? parseInput(loadSchema, input)
@@ -282,7 +290,7 @@ export async function execute(
 									? parseInput(statusSchema, input)
 									: parseInput(listSchema, input)
 		const scope = (parsed as WriteInput).scope ?? "personal"
-		if (!["search", "list", "load"].includes(operation))
+		if (!["search", "list", "load", "knowledge", "sources"].includes(operation))
 			requireGrant(principal, scope === "shared" ? "memory.shared:write" : "memory.personal:write")
 		const searchScope = (parsed as SearchInput).scope
 		if (operation === "search" && searchScope)
@@ -290,7 +298,15 @@ export async function execute(
 				searchScope === "personal" ? "memory.personal:read" : "memory.private-channel:read")
 		await deps.quota(principal, operation)
 		let result: unknown
-		if (operation === "search") {
+		if (operation === "knowledge" || operation === "sources") {
+			if (!deps.knowledge) throw new ExternalError("unavailable", 503, "Background knowledge unavailable")
+			const signal = requestSignal
+				? AbortSignal.any([requestSignal, AbortSignal.timeout(8000)])
+				: AbortSignal.timeout(8000)
+			result = operation === "sources"
+				? await deps.knowledge(null, principal, signal, (parsed as { sourcePage: number }).sourcePage)
+				: await deps.knowledge(parsed as KnowledgeInput, principal, signal)
+		} else if (operation === "search") {
 			const timeout = AbortSignal.timeout(8000)
 			const signal = requestSignal
 				? AbortSignal.any([timeout, requestSignal])

@@ -12,6 +12,7 @@ import {
 	ConnectToolsCard,
 	useConnectionsBoard,
 } from "./connections-board"
+import { SourceHealthPanel } from "./source-health"
 
 const cardStyle = {
 	boxShadow:
@@ -138,6 +139,7 @@ export function BrainHomeView() {
 						memories={memories.data?.recent ?? []}
 						loading={memories.isPending}
 					/>
+					<SourceHealthPanel />
 				</div>
 				<div className="min-w-0 space-y-6">
 					{!o.loading && (

@@ -13,6 +13,7 @@ import { brainSkillsRoutes } from "./skills"
 import { slackRoutes } from "./slack"
 import { brainTrialRoutes } from "./trial"
 import { brainWorkspacePromptRoutes } from "./workspace-prompt"
+import { brainKnowledgeRoutes } from "./knowledge"
 
 // Root for all Company Brain routes (Slack agent, connections, future CB endpoints).
 export const brainRoutes = new Hono<AppContext>()
@@ -29,3 +30,4 @@ export const brainRoutes = new Hono<AppContext>()
 	.route("/memories", brainMemoriesRoutes)
 	.route("/trial", brainTrialRoutes)
 	.route("/workspace-prompt", brainWorkspacePromptRoutes)
+	.route("/knowledge", brainKnowledgeRoutes)

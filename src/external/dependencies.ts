@@ -263,6 +263,10 @@ export function externalDependencies(
 		sharedStore: sharedStore(env),
 		sharedProvider: sharedProvider(env),
 		privateSearch: (input, principal, signal) => privateChannelSearch(env, input, principal, signal),
+		knowledge: async (input, principal, signal, sourcePage) => {
+			signal.throwIfAborted()
+			return (await agent(principal.orgId)).queryExternalKnowledge(principal, input, sourcePage)
+		},
 		listSkills: async (orgId) => (await agent(orgId)).listExternalOrgSkills(),
 		loadSkill: async (orgId, id, expectedVersion) =>
 			(await agent(orgId)).loadExternalOrgSkill(id, expectedVersion),
