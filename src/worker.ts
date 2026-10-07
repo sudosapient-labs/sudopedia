@@ -63,4 +63,13 @@ app.notFound((c) =>
 	c.env.ASSETS.fetch(c.req.raw),
 )
 
-export default app
+export default {
+	fetch: app.fetch,
+	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+		await hydrateSecrets(env)
+		configureFromEnv(env)
+		await ensureMigrated(env)
+		const { kickKnowledgeSchedules } = await import("./brain/knowledge/kick")
+		ctx.waitUntil(kickKnowledgeSchedules(env))
+	},
+}

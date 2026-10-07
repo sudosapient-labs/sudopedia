@@ -4,6 +4,7 @@ import { memoryClient } from "../memory/client"
 import { authenticate, consumeQuota } from "./credentials"
 import { hashSecret } from "./credentials"
 import { boundedSetting } from "./limits"
+import { queryKnowledgeRpc } from "./knowledge-rpc"
 import type { ExternalDependencies } from "./service"
 import { sharedSearchRequest } from "./search-request"
 export { sharedSearchRequest } from "./search-request"
@@ -263,6 +264,8 @@ export function externalDependencies(
 		sharedStore: sharedStore(env),
 		sharedProvider: sharedProvider(env),
 		privateSearch: (input, principal, signal) => privateChannelSearch(env, input, principal, signal),
+		knowledge: (input, principal, signal, sourcePage, deadline) => queryKnowledgeRpc(
+			() => agent(principal.orgId), input, principal, signal, sourcePage, deadline),
 		listSkills: async (orgId) => (await agent(orgId)).listExternalOrgSkills(),
 		loadSkill: async (orgId, id, expectedVersion) =>
 			(await agent(orgId)).loadExternalOrgSkill(id, expectedVersion),

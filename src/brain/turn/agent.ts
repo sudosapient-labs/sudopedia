@@ -83,6 +83,49 @@ export function brainAgent(agent: CompanyBrainAgent): CompanyBrainAgentHandle {
 export class CompanyBrainAgent extends Agent<Env, CompanyBrainState> {
 	override initialState: CompanyBrainState = {}
 
+	async ensureKnowledgeSchedule(orgId: string = this.name): Promise<void> {
+		if (orgId !== this.name) throw new Error("Workspace mismatch")
+		const { ensureKnowledgeSchedule } = await import("../knowledge/runtime")
+		await ensureKnowledgeSchedule(this, orgId)
+	}
+
+	async runKnowledgeTick(payload: { orgId: string }): Promise<void> {
+		if (payload.orgId !== this.name) throw new Error("Workspace mismatch")
+		const { runKnowledgeTick, knowledgeRuntimeConfig } = await import("../knowledge/runtime")
+		const { KnowledgeBudget } = await import("../knowledge/adapters")
+		const config = knowledgeRuntimeConfig(brainAgent(this).env)
+		const budget = new KnowledgeBudget(config.maxSubrequests, Date.now() + config.tickMs)
+		const { drainSlackKnowledgeInbox } = await import("../knowledge/inbox")
+		await drainSlackKnowledgeInbox(this, budget)
+		const { drainLinearWebhookInbox } = await import("../knowledge/linear-webhook")
+		await drainLinearWebhookInbox(this)
+		await runKnowledgeTick(this, payload, budget)
+	}
+
+	async ingestSlackKnowledgeEvent(payload: unknown): Promise<boolean> {
+		const { receiveSlackKnowledge } = await import("../knowledge/inbox")
+		return receiveSlackKnowledge(this, payload)
+	}
+
+	async configureLinearWebhook(userId: string, connectionId: string,
+		input: import("zod").infer<typeof import("../knowledge/linear-webhook").linearWebhookConfigSchema>) {
+		return (await import("../knowledge/linear-webhook")).configureLinearWebhook(this, userId, connectionId, input)
+	}
+
+	async receiveLinearWebhook(connectionId: string, body: string, signature: string, deliveryId: string) {
+		return (await import("../knowledge/linear-webhook")).receiveLinearWebhook(this, connectionId, body, signature, deliveryId)
+	}
+
+	async queryExternalKnowledge(principal: import("../../external/contracts").Principal,
+		input: import("../../external/contracts").KnowledgeInput | null, sourcePage?: number, deadline?: number, requestId?: string) {
+		const { queryExternalKnowledge } = await import("../knowledge/query")
+		return queryExternalKnowledge(this, principal, input, sourcePage, deadline, requestId)
+	}
+	async cancelExternalKnowledgeQuery(principal: import("../../external/contracts").Principal, requestId: string) {
+		const { cancelExternalKnowledgeQuery } = await import("../knowledge/query")
+		cancelExternalKnowledgeQuery(this, principal, requestId)
+	}
+
 	waitUntil(promise: Promise<unknown>): void {
 		this.ctx.waitUntil(promise)
 	}

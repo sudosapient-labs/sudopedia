@@ -644,6 +644,25 @@ export const slackRoutes = new Hono<AppContext>()
 			return c.json({ ok: true })
 		}
 
+		// Persist message changes before acknowledging delivery. This independent
+		// path includes edits, deletions, bots and old-thread replies even when the
+		// interactive-agent schema/triage would ignore them. Provider reads and
+		// reasoning run later on durable alarms, not in Slack's response window.
+		if (envelope && typeof envelope === "object") {
+			const delivery = envelope as { type?: unknown; team_id?: unknown; event_id?: unknown;
+				event?: { type?: unknown; channel?: unknown } }
+			if (delivery.type === "event_callback" && typeof delivery.team_id === "string" &&
+				typeof delivery.event_id === "string" && delivery.event?.type === "message" &&
+				typeof delivery.event.channel === "string") {
+				const workspace = await loadWorkspace(c.env, delivery.team_id)
+				if (workspace) {
+					const knowledgeAgent = await getAgentByName(c.env.COMPANY_BRAIN_AGENT, workspace.orgId) as unknown as CompanyBrainAgent
+					try { await knowledgeAgent.ingestSlackKnowledgeEvent(envelope) }
+					catch { return c.json({ error: "knowledge inbox unavailable" }, 503) }
+				}
+			}
+		}
+
 		const parsed = SlackEnvelopeSchema.safeParse(envelope)
 		if (!parsed.success) {
 			console.warn("[slack] envelope parse failed:", parsed.error.message)
