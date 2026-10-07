@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { sqliteFixture } from "../../../test/external/sqlite"
 import type { CompanyBrainAgent } from "../turn/agent"
 import { configureLinearWebhook, receiveLinearWebhook, drainLinearWebhookInbox } from "./linear-webhook"
-import { commitKnowledge, ensureKnowledgeTables, listPendingEvents, queryKnowledge, stageEvents, upsertSource } from "./store"
+import { commitKnowledge, ensureKnowledgeTables, listPendingEvents, queryKnowledge, revokeSource, stageEvents, upsertSource } from "./store"
 import type { KnowledgeSource } from "./types"
 vi.mock("@/lib/crypto", () => ({ encryptToken: async (t: string) => `enc:${t}`, decryptToken: async (t: string) => t.slice(4) }))
 vi.mock("../turn/agent", () => ({ brainAgent: (a: unknown) => a }))
+vi.mock("../tools/mcp/client", () => ({ connectMcpClient: vi.fn() }))
+vi.mock("../tools/mcp/provider", () => ({ connectToolProvider: vi.fn() }))
 const fixtures: ReturnType<typeof sqliteFixture>[] = []
 afterEach(() => { fixtures.splice(0).forEach(f => f.sqlite.close()) })
 const organizationId = "10000000-0000-4000-8000-000000000001", issueId = "20000000-0000-4000-8000-000000000001"
@@ -63,6 +65,10 @@ describe("personal Linear signed webhooks", () => {
 		await drainLinearWebhookInbox(agent)
 		expect(listPendingEvents(agent, source.id)).toHaveLength(1)
 		expect(listPendingEvents(agent, source.id)[0]).toMatchObject({ objectId: issueId, audience: { kind: "users", userIds: ["a"] } })
+		await receiveLinearWebhook(agent, "linear", input.body, input.signature, "delivery-1")
+		await drainLinearWebhookInbox(agent)
+		expect(listPendingEvents(agent, source.id)).toHaveLength(1)
+		expect(sqlite.prepare("SELECT processed,data FROM knowledge_linear_inbox").get()).toMatchObject({ processed: 1, data: "" })
 	})
 	it("a signed remove invalidates current state before any model call", async () => {
 		const { agent } = setup(); const time = Date.now() - 1000
@@ -73,5 +79,63 @@ describe("personal Linear signed webhooks", () => {
 		await drainLinearWebhookInbox(agent)
 		expect(queryKnowledge(agent, [source.id], "").facts).toEqual([])
 		expect(queryKnowledge(agent, [source.id], "", 20, true).facts).toHaveLength(1)
+	})
+	it("never drains owner A's queued delivery into owner B's discovered audience", async () => {
+		const { agent, sqlite } = setup()
+		await configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })
+		const input = await signed(event())
+		await receiveLinearWebhook(agent, "linear", input.body, input.signature, "old-owner")
+		sqlite.exec("UPDATE mcp_connection SET user_id='b',updated_at=2 WHERE id='linear'")
+		revokeSource(agent, source.id)
+		const fresh = { ...source, id: "mcp:linear:new", ownerUserId: "b", audience: { kind: "users" as const, userIds: ["b"] } }
+		upsertSource(agent, fresh)
+		agent.sql`INSERT INTO brain_knowledge_runtime(key,value) VALUES(${"mcp:linear"},${JSON.stringify(fresh.id)})`
+		await configureLinearWebhook(agent, "b", "linear", { organizationId, secret, consent: true })
+		await drainLinearWebhookInbox(agent)
+		expect(listPendingEvents(agent, fresh.id)).toEqual([])
+		expect(sqlite.prepare("SELECT processed,data FROM knowledge_linear_inbox").get()).toMatchObject({ processed: 1, data: "" })
+	})
+	it("rejects stale signing configuration after reconnect, even before discovery changes source ID", async () => {
+		const { agent, sqlite } = setup()
+		await configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })
+		const input = await signed(event())
+		await receiveLinearWebhook(agent, "linear", input.body, input.signature, "old-generation")
+		sqlite.exec("UPDATE mcp_connection SET access_token='new-credential',updated_at=2 WHERE id='linear'")
+		expect(await receiveLinearWebhook(agent, "linear", input.body, input.signature, "stale-signing")).toBe(false)
+		await expect(configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })).rejects.toThrow()
+		expect(sqlite.prepare("SELECT COUNT(*) AS n FROM knowledge_linear_webhook_config").get()).toMatchObject({ n: 0 })
+		expect(sqlite.prepare("SELECT processed,data FROM knowledge_linear_inbox").get()).toMatchObject({ processed: 1, data: "" })
+		// Discovery rotates the revoked generation; only a newly configured
+		// signing binding may admit content under the fresh source identity.
+		const fresh = { ...source, id: "mcp:linear:reconnected" }
+		upsertSource(agent, fresh)
+		agent.sql`INSERT INTO brain_knowledge_runtime(key,value) VALUES(${"mcp:linear"},${JSON.stringify(fresh.id)}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+		await configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })
+		await receiveLinearWebhook(agent, "linear", input.body, input.signature, "fresh-generation")
+		await drainLinearWebhookInbox(agent)
+		expect(listPendingEvents(agent, fresh.id)).toHaveLength(1)
+	})
+	it.each(["UPDATE mcp_connection SET status='revoked'", "DELETE FROM member WHERE user_id='a'"])("checks live authority before discovery: %s", async mutation => {
+		const { agent, sqlite } = setup()
+		await configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })
+		const input = await signed(event())
+		await receiveLinearWebhook(agent, "linear", input.body, input.signature, "queued")
+		sqlite.exec(mutation)
+		await drainLinearWebhookInbox(agent)
+		expect(listPendingEvents(agent, source.id)).toEqual([])
+		expect(sqlite.prepare("SELECT processed,data FROM knowledge_linear_inbox").get()).toMatchObject({ processed: 1, data: "" })
+		expect(await receiveLinearWebhook(agent, "linear", input.body, input.signature, "after-revocation")).toBe(false)
+		await expect(configureLinearWebhook(agent, "a", "linear", { organizationId, secret, consent: true })).rejects.toThrow()
+	})
+	it("migrates legacy config and deliveries without guessing owner or generation", async () => {
+		const { agent, sqlite } = setup()
+		sqlite.exec(`CREATE TABLE knowledge_linear_webhook_config(connection_id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,secret_enc TEXT NOT NULL);
+			CREATE TABLE knowledge_linear_inbox(delivery_id TEXT PRIMARY KEY,connection_id TEXT NOT NULL,data TEXT NOT NULL,received_at INTEGER NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,processed INTEGER NOT NULL DEFAULT 0)`)
+		sqlite.prepare("INSERT INTO knowledge_linear_webhook_config VALUES(?,?,?)").run("linear", organizationId, `enc:${secret}`)
+		sqlite.prepare("INSERT INTO knowledge_linear_inbox(delivery_id,connection_id,data,received_at) VALUES(?,?,?,?)").run("legacy", "linear", JSON.stringify(event()), Date.now())
+		await drainLinearWebhookInbox(agent)
+		expect(listPendingEvents(agent, source.id)).toEqual([])
+		expect(sqlite.prepare("SELECT processed,data,binding FROM knowledge_linear_inbox").get()).toMatchObject({ processed: 1, data: "", binding: null })
+		expect(sqlite.prepare("SELECT COUNT(*) AS n FROM knowledge_linear_webhook_config").get()).toMatchObject({ n: 0 })
 	})
 })

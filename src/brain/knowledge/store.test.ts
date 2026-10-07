@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { sqliteFixture } from "../../../test/external/sqlite"
 import { audienceSchema, commitKnowledge, ensureKnowledgeTables, getSource, intersectAudiences, listPendingEvents, listSources, pruneKnowledge, queryKnowledge, reasoningContext, revokeSource, stageEvents, upsertSource } from "./store"
 import type { EvidenceEvent, FactProposal, KnowledgeAgent, KnowledgeSource } from "./types"
+import { captureReasoningSnapshot } from "./store"
 
 const source: KnowledgeSource = {
 	id: "s", orgId: "org", connectionId: "private-connection", provider: "mcp", ownerUserId: null,
@@ -68,6 +69,43 @@ function crossSource(agent: KnowledgeAgent, overrides: Partial<KnowledgeSource> 
 }
 
 describe("durable knowledge", () => {
+	it.each(["edit", "delete", "acl", "state", "pending"])("aborts the entire inference on an uncited private batch %s race", race => {
+		const { agent } = setup()
+		stageEvents(agent, source, [{ ...event("public", "public-object"), audience: source.audience }, event("private", "private-object")])
+		const batch = listPendingEvents(agent, source.id)
+		const snapshot = captureReasoningSnapshot(agent, batch, [])
+		if (race === "edit" || race === "delete") stageEvents(agent, source, [{ ...event("private-new", "private-object", 2), deleted: race === "delete" }])
+		if (race === "acl") upsertSource(agent, { ...source, audience: { kind: "users", userIds: ["a"] } })
+		if (race === "state") upsertSource(agent, { ...source, state: "error" })
+		if (race === "pending") commitKnowledge(agent, source.id, ["private"], [], 0)
+		expect(() => commitKnowledge(agent, source.id, batch.map(e => e.eventId), [proposal(["public"], "private detail")], 9999, [], snapshot)).toThrow()
+		expect(queryKnowledge(agent, [source.id], "").facts).toEqual([])
+		expect(listPendingEvents(agent, source.id).some(e => e.eventId === "public")).toBe(true)
+		expect(getSource(agent, source.id)!.processedThrough).not.toBe(9999)
+	})
+	it.each(["edit", "delete", "acl", "state", "pending"])("aborts uncited context %s races before publishing any output", race => {
+		const { agent } = setup()
+		const { other, issue } = crossSource(agent)
+		stageEvents(agent, source, [event()])
+		const batch = listPendingEvents(agent, source.id)
+		const snapshot = captureReasoningSnapshot(agent, batch, [issue])
+		if (race === "edit" || race === "delete") stageEvents(agent, other, [{ ...issue, eventId: "changed", version: 2, deleted: race === "delete" }])
+		if (race === "acl") upsertSource(agent, { ...other, audience: { kind: "users", userIds: ["a"] } })
+		if (race === "state") upsertSource(agent, { ...other, state: "error" })
+		if (race === "pending") agent.sql`UPDATE knowledge_event SET pending = 1 WHERE source_id = ${other.id}`
+		expect(() => commitKnowledge(agent, source.id, ["e1"], [proposal()], 9999, [issue], snapshot)).toThrow()
+		expect(queryKnowledge(agent, [source.id], "").facts).toEqual([])
+		expect(listPendingEvents(agent, source.id)).toHaveLength(1)
+	})
+	it("makes a fully committed unchanged snapshot replay a safe no-op", () => {
+		const { agent } = setup()
+		stageEvents(agent, source, [event()])
+		const snapshot = captureReasoningSnapshot(agent, listPendingEvents(agent, source.id), [])
+		commitKnowledge(agent, source.id, ["e1"], [proposal()], 1000, [], snapshot)
+		commitKnowledge(agent, source.id, ["e1"], [proposal(["e1"], "tainted replay")], 9999, [], snapshot)
+		expect(queryKnowledge(agent, [source.id], "").facts.map(f => f.value)).toEqual(["first"])
+		expect(getSource(agent, source.id)!.processedThrough).toBe(1000)
+	})
 	it("taints uncited model output with every supplied private input and invalidates it on context edits", () => {
 		const { agent } = setup()
 		const { other, issue } = crossSource(agent, { audience: { kind: "users", userIds: ["a"] } }, { text: "Private price for ISSUE-42 is 700" })
@@ -157,7 +195,7 @@ describe("durable knowledge", () => {
 		const { agent } = setup()
 		stageEvents(agent, source, [event()])
 		stageEvents(agent, source, [event("new", "object-1", 2)])
-		commitKnowledge(agent, "s", ["e1"], [proposal()], 1000)
+		expect(() => commitKnowledge(agent, "s", ["e1"], [proposal()], 1000)).toThrow("Stale batch")
 		expect(queryKnowledge(agent, ["s"], "").facts).toEqual([])
 		expect(listPendingEvents(agent, "s").map(e => e.eventId)).toEqual(["new"])
 		expect(() => stageEvents(agent, source, Array.from({ length: 101 }, () => event()))).toThrow()

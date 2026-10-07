@@ -3,7 +3,7 @@ import { sqliteFixture } from "../../../test/external/sqlite"
 import { mcpConnection } from "../../db/schema/brain/mcp"
 import type { CompanyBrainAgent } from "../turn/agent"
 import type { KnowledgeSource } from "./types"
-import { ensureKnowledgeTables, getSource, listPendingEvents, listSources, revokeSource, upsertSource } from "./store"
+import { ensureKnowledgeTables, getSource, listPendingEvents, listSources, queryKnowledge, revokeSource, stageEvents, upsertSource } from "./store"
 
 const mocks = vi.hoisted(() => ({ connections: [] as unknown[], workspaces: [] as unknown[] }))
 vi.mock("@repo/db", () => ({ eq: vi.fn(), db: () => ({ select: () => ({ from: (table: unknown) => ({ where: async () => table === mcpConnection ? mocks.connections : mocks.workspaces }) }) }) }))
@@ -12,7 +12,7 @@ vi.mock("@/lib/crypto", () => ({ decryptToken: vi.fn(async () => "secret") }))
 vi.mock("../tools/mcp/client", () => ({ connectMcpClient: vi.fn() }))
 vi.mock("../tools/mcp/provider", () => ({ connectToolProvider: vi.fn() }))
 vi.mock("../slack/client", () => ({ getSlackChannelHistoryPage: vi.fn() }))
-vi.mock("./reasoning", () => ({ reasonEvents: vi.fn(async () => []) }))
+vi.mock("./reasoning", () => ({ MAX_REASONING_EVENTS: 3, MAX_REASONING_CONTEXT: 2, reasonEvents: vi.fn(async () => []) }))
 vi.mock("./adapters", async importOriginal => ({ ...await importOriginal<typeof import("./adapters")>(), openKnowledgeProvider: vi.fn(), inspectKnowledgeTools: vi.fn(), pollLinear: vi.fn(), pollSlack: vi.fn(), slackKnowledgeRequest: vi.fn(), slackKnowledgeToken: vi.fn(async () => "secret") }))
 import { KnowledgeProviderError, inspectKnowledgeTools, openKnowledgeProvider, pollLinear, pollSlack, slackKnowledgeRequest } from "./adapters"
 import { reasonEvents } from "./reasoning"
@@ -59,6 +59,55 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); for (const fixture of fixtures.splice(0)) fixture.sqlite.close() })
 
 describe("proactive ingestion runtime", () => {
+	it("keeps a partially committed 25-event page checkpoint across a failed chunk and retries without refetching", async () => {
+		const { agent } = setup(); mocks.connections = [connection()]; upsertSource(agent, source())
+		vi.mocked(pollLinear).mockImplementationOnce(async s => ({ events: Array.from({ length: 25 }, (_, i) => ({ ...event(s), eventId: `retry-${i}`, objectId: `object-${i}` })), cursor: "checkpoint", processedThrough: now, complete: false }))
+		vi.mocked(reasonEvents).mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("crash during third chunk"))
+		await runKnowledgeTick(agent, { orgId: "org" })
+		expect(listPendingEvents(agent, "mcp:conn")).toHaveLength(19)
+		expect(getSource(agent, "mcp:conn")).toMatchObject({ cursor: null, processedThrough: null })
+		vi.setSystemTime(now + 120_000)
+		await runKnowledgeTick(agent, { orgId: "org" })
+		expect(listPendingEvents(agent, "mcp:conn")).toHaveLength(0)
+		expect(getSource(agent, "mcp:conn")).toMatchObject({ cursor: "checkpoint", processedThrough: now })
+		expect(pollLinear).toHaveBeenCalledTimes(1)
+		expect(vi.mocked(reasonEvents).mock.calls.every(call => call[1].length <= 3 && call[2]!.length <= 2)).toBe(true)
+	})
+	it("drains a default 25-event page in <=3 event / <=2 context chunks before promoting its checkpoint", async () => {
+		const { agent } = setup(); mocks.connections = [connection()]; upsertSource(agent, source())
+		vi.mocked(pollLinear).mockImplementationOnce(async s => ({ events: Array.from({ length: 25 }, (_, i) => ({ ...event(s), eventId: `page-${i}`, objectId: `object-${i}` })), cursor: "page-complete", processedThrough: now, complete: false }))
+		vi.mocked(reasonEvents).mockImplementation(async (_env, batch, context) => {
+			expect(batch.length).toBeLessThanOrEqual(3)
+			expect(context!.length).toBeLessThanOrEqual(2)
+			expect(getSource(agent, "mcp:conn")!.cursor).toBeNull()
+			expect(getSource(agent, "mcp:conn")!.processedThrough).toBeNull()
+			return [{ subject: "Issue", predicate: "state", value: "Explicit status", evidenceIds: [batch[0]!.eventId], confidence: "confirmed" }]
+		})
+		await runKnowledgeTick(agent, { orgId: "org" })
+		expect(reasonEvents).toHaveBeenCalledTimes(9)
+		expect(listPendingEvents(agent, "mcp:conn")).toHaveLength(0)
+		expect(getSource(agent, "mcp:conn")).toMatchObject({ cursor: "page-complete", processedThrough: now })
+		const facts = queryKnowledge(agent, ["mcp:conn"], "").facts
+		expect(facts).toHaveLength(9)
+		expect(facts.every(f => new Set(f.evidence.map(e => e.objectId)).size <= 5)).toBe(true)
+	})
+	it("retries all pending inputs after an uncited edit during model reasoning", async () => {
+		const { agent } = setup(); mocks.connections = [connection()]; upsertSource(agent, source())
+		vi.mocked(pollLinear).mockImplementationOnce(async s => ({ events: [event(s), { ...event(s), eventId: "private", objectId: "private-object" }], cursor: "checkpoint", processedThrough: now, complete: false }))
+		vi.mocked(reasonEvents).mockImplementationOnce(async () => {
+			stageEvents(agent, source(), [{ ...event(source()), eventId: "private-edit", objectId: "private-object", version: now + 1 }])
+			return [{ subject: "Issue", predicate: "state", value: "tainted", evidenceIds: ["e"], confidence: "confirmed" }]
+		})
+		await runKnowledgeTick(agent, { orgId: "org" })
+		expect(queryKnowledge(agent, ["mcp:conn"], "").facts).toEqual([])
+		expect(getSource(agent, "mcp:conn")).toMatchObject({ cursor: null, processedThrough: null })
+		expect(listPendingEvents(agent, "mcp:conn")).toHaveLength(2)
+		vi.setSystemTime(now + 120_000)
+		await runKnowledgeTick(agent, { orgId: "org" })
+		expect(pollLinear).toHaveBeenCalledTimes(1)
+		expect(listPendingEvents(agent, "mcp:conn")).toHaveLength(0)
+		expect(getSource(agent, "mcp:conn")!.cursor).toBe("checkpoint")
+	})
 	it("registers all actual same-provider connection rows with fail-closed audiences", async () => {
 		const { agent } = setup()
 		mocks.connections = [connection("one", "a"), connection("two", "b"), connection("shared", null), connection("custom", "a", "custom")]

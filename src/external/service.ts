@@ -46,7 +46,7 @@ export type ExternalDependencies = {
 	sharedStore?: PersonalStore
 	sharedProvider?: PersonalProvider
 	privateSearch?: (input: SearchInput, principal: Principal, signal: AbortSignal) => Promise<unknown>
-	knowledge?: (input: KnowledgeInput | null, principal: Principal, signal: AbortSignal, sourcePage?: number) => Promise<unknown>
+	knowledge?: (input: KnowledgeInput | null, principal: Principal, signal: AbortSignal, sourcePage?: number, deadline?: number) => Promise<unknown>
 	listSkills: (orgId: string) => Promise<SkillIndex[]>
 	loadSkill: (
 		orgId: string,
@@ -300,12 +300,13 @@ export async function execute(
 		let result: unknown
 		if (operation === "knowledge" || operation === "sources") {
 			if (!deps.knowledge) throw new ExternalError("unavailable", 503, "Background knowledge unavailable")
+			const deadline = Date.now() + 8000
 			const signal = requestSignal
 				? AbortSignal.any([requestSignal, AbortSignal.timeout(8000)])
 				: AbortSignal.timeout(8000)
 			result = operation === "sources"
-				? await deps.knowledge(null, principal, signal, (parsed as { sourcePage: number }).sourcePage)
-				: await deps.knowledge(parsed as KnowledgeInput, principal, signal)
+				? await deps.knowledge(null, principal, signal, (parsed as { sourcePage: number }).sourcePage, deadline)
+				: await deps.knowledge(parsed as KnowledgeInput, principal, signal, undefined, deadline)
 		} else if (operation === "search") {
 			const timeout = AbortSignal.timeout(8000)
 			const signal = requestSignal

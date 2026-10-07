@@ -62,6 +62,20 @@ Status includes connection state, coverage, last check, last successful processi
 
 Every model output inherits the audience, retained input evidence and invalidation dependencies of ALL supplied evidence, including context it did not cite. Citations cannot broaden access. This conservative boundary can restrict an entire reasoning batch, invalidate unrelated outputs from that batch, or hit fact payload limits with large context; ACL-isolated reasoning and compact shared provenance are future optimizations. Live Slack object existence/content/version is checked before disclosure as well as channel membership, so a missed edit/deletion withholds a cached current fact. Slack and Linear disclosure checks share bounded request budgets and fail closed. Slack webhook draining shares the tick's operation/deadline budget and installation cooldown, including Retry-After. Responses use bounded evidence excerpts after full verification.
 
+## PR audit fixes
+
+Reasoning captures an immutable batch/context/source-policy snapshot before the model call. Commit rejects the entire inference if any input is edited, deleted, replaced, processed concurrently, revoked, or has a changed audience; it never drops a private input and publishes the remainder. Runtime reasoning uses at most three staged events plus two context objects per call. Fetched pages drain in these smaller chunks; cursor and page watermark advance only after all pending evidence is committed. Every supplied input remains an access/invalidation dependency.
+
+Disclosure caches each source's verified MCP get-tool catalog within the request and uses a bounded 40-operation evidence budget, enough for five distinct sources including conservative setup reservations. Tests exercise a 25-issue page through the real store/access/query/verifier with mocked provider transport, rather than mocking authorization/verification away. Provider failures/deadlines still withhold evidence rather than bypass checks.
+
+Slack evidence retains a SHA-256 fingerprint of full normalized content before clipping/redaction, plus a provider content-edit version distinct from delivery ordering. Live comparison uses these values; long messages and redaction no longer create false mismatches. Fingerprints are not returned in query excerpts. Legacy evidence uses conservative redacted-prefix and version checks.
+
+Linear webhook configuration and admitted deliveries are bound to the current discovered source, owner and a hash of live credential-generation fields. Legacy unbound rows fail closed. Old deliveries are scrubbed rather than reassigned after reconnect/owner changes. Credential changes, including OAuth refresh, conservatively require source rediscovery and webhook reconfiguration; automatic webhook renewal is not implemented. Incremental polling remains the recovery path.
+
+Slack revoked/invalid deliveries are terminally scrubbed. Unknown-source deliveries have a 24-hour quarantine, after which bodies are scrubbed and durable channel/installation coverage flags record the recovery gap; no successful knowledge watermark is claimed. Admission also reclaims expired/revoked backlog so it cannot permanently consume the entire inbox. Retryable provider failures honor Retry-After.
+
+One absolute eight-second deadline spans Worker agent lookup, RPC dispatch, permission checks and live evidence verification. An actor-bound request identity carries cancellation to the Durable Object; a late cancellation cannot cancel another actor's request. Individual waits are bounded even when a local D1/RPC promise itself cannot be cancelled, and no later phase receives a fresh budget.
+
 - Linear official MCP documentation: <https://linear.app/docs/mcp>. Tool argument/continuation schemas are verified against the authenticated server's live catalog, not assumed from this overview.
 - Linear signed webhooks: <https://linear.app/developers/webhooks>.
 - Granola MCP: <https://docs.granola.ai/help-center/sharing/integrations/mcp>; separate REST API: <https://docs.granola.ai/api-reference/list-notes>; webhooks: <https://docs.granola.ai/webhooks>.

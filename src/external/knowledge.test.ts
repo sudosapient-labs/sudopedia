@@ -14,7 +14,7 @@ describe("background knowledge MCP operations", () => {
 	it("uses authenticated identity, read grant, quota and current recall default", async () => {
 		const { principal, deps } = fixture()
 		expect(await execute(deps, "knowledge", { query: "Did Deepak start the work?" })).toMatchObject({ sources: [{ state: "partial" }] })
-		expect(deps.knowledge).toHaveBeenCalledWith({ query: "Did Deepak start the work?", limit: 10, recall: "current", sourcePage: 0 }, principal, expect.any(AbortSignal))
+		expect(deps.knowledge).toHaveBeenCalledWith({ query: "Did Deepak start the work?", limit: 10, recall: "current", sourcePage: 0 }, principal, expect.any(AbortSignal), undefined, expect.any(Number))
 		expect(deps.quota).toHaveBeenCalledWith(principal, "knowledge")
 	})
 	it("never accepts caller-selected source, audience or identity", async () => {
@@ -34,7 +34,7 @@ describe("background knowledge MCP operations", () => {
 	it("source status is read-only and fails honestly when unavailable", async () => {
 		const { deps, principal } = fixture()
 		await execute(deps, "sources", {})
-		expect(deps.knowledge).toHaveBeenCalledWith(null, principal, expect.any(AbortSignal), 0)
+		expect(deps.knowledge).toHaveBeenCalledWith(null, principal, expect.any(AbortSignal), 0, expect.any(Number))
 		delete deps.knowledge
 		await expect(execute(deps, "knowledge", { query: "status" })).rejects.toMatchObject({ status: 503 })
 	})

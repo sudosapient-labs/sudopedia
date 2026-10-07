@@ -20,6 +20,7 @@ export async function knowledgeAccess(env: Env, principal: Principal,
 	let budget = 30, incomplete = false
 	const cache = new Map<string, boolean>()
 	const call = async (token: string, method: string, params: Record<string, string>) => {
+		signal.throwIfAborted()
 		if (--budget < 0) throw new Error("permission budget")
 		const url = new URL(`https://slack.com/api/${method}`)
 		for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
@@ -44,6 +45,7 @@ export async function knowledgeAccess(env: Env, principal: Principal,
 		return z.object({ ok: z.literal(true) }).passthrough().parse(body)
 	}
 	const audience = async (acl: Audience): Promise<boolean> => {
+		if (signal.aborted) { incomplete = true; return false }
 		if (principal.kind !== "employee") return false
 		if (acl.kind === "intersection") {
 			if (!acl.audiences.length || acl.audiences.length > 32) return false
@@ -85,6 +87,7 @@ export async function knowledgeAccess(env: Env, principal: Principal,
 		} catch { incomplete = true; cache.set(key, false); return false }
 	}
 	const source = async (row: KnowledgeSource, metadataOnly = false): Promise<boolean> => {
+		if (signal.aborted) { incomplete = true; return false }
 		if (row.orgId !== principal.orgId || (!metadataOnly && row.state === "revoked")) return false
 		if (row.provider !== "slack") {
 			const connection = await env.DB.prepare(`SELECT id,status FROM mcp_connection

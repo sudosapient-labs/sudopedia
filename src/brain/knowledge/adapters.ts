@@ -1,4 +1,5 @@
 import { decryptToken } from "@/lib/crypto"
+import { createHash } from "node:crypto"
 import { getSlackChannelHistoryPage } from "../slack/client"
 import { connectMcpClient } from "../tools/mcp/client"
 import { connectToolProvider, type ProviderTool, type ToolProviderHandle } from "../tools/mcp/provider"
@@ -13,12 +14,15 @@ export class KnowledgeProviderError extends Error {
 }
 
 export class KnowledgeBudget {
-	constructor(public remaining: number, public readonly deadline: number) {}
+	constructor(public remaining: number, public readonly deadline: number, private readonly cancellation?: AbortSignal) {}
 	take(count = 1) {
-		if (this.remaining < count || Date.now() >= this.deadline) throw new KnowledgeProviderError("budget_exhausted")
+		if (this.cancellation?.aborted || this.remaining < count || Date.now() >= this.deadline) throw new KnowledgeProviderError("budget_exhausted")
 		this.remaining -= count
 	}
-	signal() { return AbortSignal.timeout(Math.max(1, Math.min(10_000, this.deadline - Date.now()))) }
+	signal() {
+		const timeout = AbortSignal.timeout(Math.max(1, Math.min(10_000, this.deadline - Date.now())))
+		return this.cancellation ? AbortSignal.any([timeout, this.cancellation]) : timeout
+	}
 }
 
 export type PollPage = { events: EvidenceEvent[]; cursor: string | null; processedThrough: number; complete: boolean; threadRoots?: string[] }
@@ -198,10 +202,14 @@ export function slackEvidence(source: KnowledgeSource, raw: unknown, now: number
 	if (!Number.isSafeInteger(version)) return null
 	const audience = source.audience
 	if (audience.kind !== "slack_channel") return null
+	const content = `Slack message ${ts}; user ${string(message.user)}; thread ${string(message.thread_ts) || ts}\n${string(message.text)}`
+	const contentVersion = Math.round(Number(string(record(message.edited).ts) || ts) * 1_000_000)
+	if (!Number.isSafeInteger(contentVersion)) return null
 	return { sourceId: source.id, eventId: `${source.id}:${eventId || `${ts}:${version}:${deleted ? "deleted" : "message"}`}`, objectId: ts, version,
 		occurredAt: Math.round(Number(ts) * 1000), observedAt: now, deleted, audience,
 		url: `https://app.slack.com/archives/${audience.channelId}/p${ts.replace(".", "")}`,
-		text: deleted ? "" : `Slack message ${ts}; user ${string(message.user)}; thread ${string(message.thread_ts) || ts}\n${string(message.text)}`.slice(0, TEXT_LIMIT),
+		text: deleted ? "" : content.slice(0, TEXT_LIMIT),
+		contentFingerprint: createHash("sha256").update(content).digest("hex"), contentVersion,
 		context: `slack-thread:${string(message.thread_ts) || ts}`,
 	}
 }

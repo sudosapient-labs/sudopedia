@@ -4,8 +4,8 @@ import { slackWorkspace } from "../../db/schema/slack"
 import { brainAgent, type CompanyBrainAgent } from "../turn/agent"
 import type { McpConnectionRow } from "../tools/mcp/store"
 import { KnowledgeBudget, KnowledgeProviderError, inspectKnowledgeTools, linearIssueTool, openKnowledgeProvider, pollLinear, pollSlack, slackEvidence, slackKnowledgeRequest, slackKnowledgeToken } from "./adapters"
-import { reasonEvents } from "./reasoning"
-import { commitKnowledge, ensureKnowledgeTables, getSource, listPendingEvents, listSources, pruneKnowledge, revokeSource, stageEvents, upsertSource, reasoningContext, visible } from "./store"
+import { MAX_REASONING_CONTEXT, MAX_REASONING_EVENTS, reasonEvents } from "./reasoning"
+import { captureReasoningSnapshot, commitKnowledge, ensureKnowledgeTables, getSource, listPendingEvents, listSources, pruneKnowledge, revokeSource, stageEvents, upsertSource, reasoningContext, visible } from "./store"
 import type { Audience, KnowledgeSource } from "./types"
 import { rememberSlackThreads, reconcileSlackThreads } from "./threads"
 
@@ -55,8 +55,23 @@ async function proposalsFor(agent: CompanyBrainAgent, env: Env, source: Knowledg
 	if (!visible(source.audience)) throw new KnowledgeProviderError("unsupported_schema")
 	if (events.every(e => e.deleted)) return { proposals: [], context: [] }
 	budget.take()
-	const context = reasoningContext(agent, source.id, events)
-	return { proposals: await reasonEvents(env, events, context, AbortSignal.timeout(Math.max(1, budget.deadline - Date.now()))), context }
+	const context = reasoningContext(agent, source.id, events, MAX_REASONING_CONTEXT)
+	const snapshot = captureReasoningSnapshot(agent, events, context)
+	return { proposals: await reasonEvents(env, snapshot.batch, snapshot.context, AbortSignal.timeout(Math.max(1, budget.deadline - Date.now()))), context: snapshot.context, snapshot }
+}
+
+/** One source gets at most one page's worth of model work per tick. */
+async function drainPending(agent: CompanyBrainAgent, env: Env, source: KnowledgeSource, limit: number, budget: KnowledgeBudget): Promise<number> {
+	let processed = 0
+	while (processed < limit && budget.remaining > 0 && Date.now() < budget.deadline) {
+		const batch = listPendingEvents(agent, source.id, Math.min(MAX_REASONING_EVENTS, limit - processed))
+		if (!batch.length) break
+		const current = getSource(agent, source.id)!
+		const { proposals, context, snapshot } = await proposalsFor(agent, env, current, batch, budget)
+		commitKnowledge(agent, source.id, batch.map(event => event.eventId), proposals, current.processedThrough ?? 0, context, snapshot, false)
+		processed += batch.length
+	}
+	return processed
 }
 
 async function connectionRows(env: Env, orgId: string) {
@@ -165,7 +180,11 @@ export async function discoverKnowledgeSources(agent: CompanyBrainAgent, orgId: 
 						if (getSource(agent, channelId)?.state === "revoked") channelId = sourceIdentity(agent, base, true)
 						const channelSource = getSource(agent, channelId) ?? newSource(channelId, orgId, `slack:${candidate.row.teamId}`, "slack", null, { kind: "slack_channel", teamId: candidate.row.teamId, channelId: channel.id }, config)
 						if (channelSource.state !== "error") channelSource.state = "partial"
-						channelSource.coverage = [...new Set(["joined_channel_history", "webhook_replies_edits_deletions", ...(channelSource.coverage.includes("known_thread_reconciliation") ? channelSource.coverage.filter(c => c !== "no_thread_reconciliation") : ["no_thread_reconciliation"])])]
+						const quarantineGap = state.get<{ count?: number }>("slack-inbox:quarantine-expired", {}).count
+						channelSource.coverage = [...new Set(["joined_channel_history", "webhook_replies_edits_deletions",
+							...channelSource.coverage.filter(c => c !== "discovery_pending" && (c !== "no_thread_reconciliation" || !channelSource.coverage.includes("known_thread_reconciliation"))),
+							...(channelSource.coverage.includes("known_thread_reconciliation") ? [] : ["no_thread_reconciliation"]),
+							...(quarantineGap ? ["webhook_quarantine_expired_reconciliation_required"] : [])])]
 						upsertSource(agent, channelSource)
 					}
 					const next = (page.response_metadata as { next_cursor?: string } | undefined)?.next_cursor?.trim() || null
@@ -230,10 +249,8 @@ export async function runKnowledgeTick(agent: CompanyBrainAgent, payload: { orgI
 					// after every pending chunk commits, including after configuration changes.
 					const state = metadata(agent)
 					const checkpoint = state.get<{ cursor: string | null; processedThrough: number } | null>(`pending:${source.id}`, null)
-					const { proposals, context } = await proposalsFor(agent, env, source, pending, budget)
-					const priorWatermark = source.processedThrough ?? Math.max(0, Math.min(...pending.map(e => e.observedAt)) - config.backfillMs - 60_000)
-					commitKnowledge(agent, source.id, pending.map(e => e.eventId), proposals, priorWatermark, context)
-					eventsLeft -= pending.length; pagesLeft--
+					const processed = await drainPending(agent, env, source, Math.min(eventsLeft, config.pageSize), budget)
+					eventsLeft -= processed; pagesLeft--
 					const current = getSource(agent, source.id)!
 					const drained = !listPendingEvents(agent, source.id, 1).length
 					upsertSource(agent, { ...current, ...(checkpoint && drained ? { cursor: checkpoint.cursor, processedThrough: checkpoint.processedThrough } : {}), lastCheckedAt: now, nextCheckAt: now + config.minIntervalMs, failures: 0, error: null, state: "partial" })
@@ -265,12 +282,9 @@ export async function runKnowledgeTick(agent: CompanyBrainAgent, payload: { orgI
 				stageEvents(agent, source, page.events)
 				rememberSlackThreads(agent, source, page.events, page.threadRoots)
 				metadata(agent).set(`pending:${source.id}`, { cursor: page.cursor, processedThrough: page.processedThrough })
-				const staged = listPendingEvents(agent, source.id, opts.limit)
-				if (staged.length) {
-					const { proposals, context } = await proposalsFor(agent, env, source, staged, budget)
-					commitKnowledge(agent, source.id, staged.map(e => e.eventId), proposals, page.processedThrough, context)
-				}
+				await drainPending(agent, env, source, opts.limit, budget)
 				const current = getSource(agent, source.id)!
+				const drained = !listPendingEvents(agent, source.id, 1).length
 				const trackerMax = source.provider === "linear" ? Math.min(config.maxIntervalMs, 5 * 60_000) : config.maxIntervalMs
 				const activityMin = source.provider === "slack" ? Math.max(config.minIntervalMs, 5 * 60_000) : config.minIntervalMs
 				const intervalMs = !page.complete ? config.minIntervalMs : page.events.length
@@ -278,8 +292,8 @@ export async function runKnowledgeTick(agent: CompanyBrainAgent, payload: { orgI
 					: Math.min(trackerMax, Math.max(config.minIntervalMs, source.intervalMs * 2))
 				// Cursor only changes after commit. Empty successful pages may advance a
 				// checked watermark but must never pretend that knowledge was processed.
-				upsertSource(agent, { ...current, cursor: page.cursor, processedThrough: page.processedThrough, state: "partial", lastCheckedAt: now, nextCheckAt: now + intervalMs, intervalMs, failures: 0, error: null })
-				metadata(agent).set(`pending:${source.id}`, null)
+				upsertSource(agent, { ...current, ...(drained ? { cursor: page.cursor, processedThrough: page.processedThrough } : {}), state: "partial", lastCheckedAt: now, nextCheckAt: now + (drained ? intervalMs : config.minIntervalMs), intervalMs, failures: 0, error: null })
+				if (drained) metadata(agent).set(`pending:${source.id}`, null)
 			} catch (error) {
 				if (error instanceof KnowledgeProviderError && error.code === "budget_exhausted") break
 				if (source.provider === "slack" && error instanceof KnowledgeProviderError && error.code === "rate_limited") state.set(`cooldown:${source.connectionId}`, now + Math.max(config.minIntervalMs, Math.min(7 * 86_400_000, error.retryAfterMs)))

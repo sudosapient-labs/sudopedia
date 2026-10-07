@@ -2,18 +2,23 @@ import { getConnectionById } from "../tools/mcp/store"
 import { KnowledgeBudget, inspectKnowledgeTools, openKnowledgeProvider, slackEvidence, slackKnowledgeRequest, slackKnowledgeToken } from "./adapters"
 import type { ToolProviderHandle } from "../tools/mcp/provider"
 import type { EvidenceEvent, KnowledgeSource } from "./types"
+import { redactKnowledgeSecrets } from "./secrets"
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}
 
 /** Live object access is distinct from locally connected-account ownership.
  * The provider may revoke a team's permissions without changing our D1 row. */
-export function evidenceVerifier(env: Env, deadline = Date.now() + 7000) {
+export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancellation?: AbortSignal) {
 	const handles = new Map<string, ToolProviderHandle>()
+	const toolNames = new Map<string, string>()
 	const cache = new Map<string, boolean>()
-	const budget = new KnowledgeBudget(12, deadline)
+	// Runtime emits at most 3 batch + 2 context objects. This bounded allowance
+	// also covers separate MCP setup/catalog reservations for all five sources.
+	const budget = new KnowledgeBudget(40, deadline, cancellation)
 	let incomplete = false
 	const verify = async (source: KnowledgeSource, event: EvidenceEvent, historical = false): Promise<boolean> => {
-		const key = `${source.id}:${event.objectId}:${event.version}:${historical}`
+		const key = `${source.id}:${event.objectId}:${event.version}:${event.contentFingerprint ?? "legacy"}:${historical}`
+		if (Date.now() >= deadline || cancellation?.aborted) { incomplete = true; return false }
 		if (cache.has(key)) return cache.get(key)!
 		try {
 			if (source.provider === "slack") {
@@ -33,7 +38,12 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000) {
 				const live = raw ? slackEvidence(source, raw, Date.now()) : null
 				// Webhook delivery time can differ from Slack's edit timestamp. Match
 				// normalized content too, so missed edits cannot pass as current.
-				const allowed = !!live && !live.deleted && (historical ? live.version >= event.version : live.text === event.text && live.version <= event.version)
+				const contentMatches = live && (event.contentFingerprint
+					? live.contentFingerprint === event.contentFingerprint && live.contentVersion === event.contentVersion
+					: redactKnowledgeSecrets(live.text).slice(0, event.text.length) === event.text && live.version <= event.version)
+				const allowed = !!live && !live.deleted && (historical
+					? (live.contentVersion ?? live.version) >= (event.contentVersion ?? event.version)
+					: !!contentMatches)
 				if (!allowed) incomplete = true
 				cache.set(key, allowed); return allowed
 			}
@@ -43,12 +53,16 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000) {
 				!connection.serverUrl || new URL(connection.serverUrl).hostname !== "mcp.linear.app") throw new Error("Connection unavailable")
 			let handle = handles.get(source.id)
 			if (!handle) { handle = await openKnowledgeProvider(env, connection, budget); handles.set(source.id, handle) }
-			const tools = await inspectKnowledgeTools(handle, budget)
-			const tool = tools.find(t => t.name === "get_issue" && t.annotations?.destructiveHint !== true && t.annotations?.readOnlyHint !== false)
-			const props = record(tool?.inputSchema.properties)
-			if (!tool || record(props.id).type !== "string" || (tool.inputSchema.required ?? []).some(k => k !== "id")) throw new Error("Unsupported permission schema")
+			let toolName = toolNames.get(source.id)
+			if (!toolName) {
+				const tools = await inspectKnowledgeTools(handle, budget)
+				const tool = tools.find(t => t.name === "get_issue" && t.annotations?.destructiveHint !== true && t.annotations?.readOnlyHint !== false)
+				const props = record(tool?.inputSchema.properties)
+				if (!tool || record(props.id).type !== "string" || (tool.inputSchema.required ?? []).some(k => k !== "id")) throw new Error("Unsupported permission schema")
+				toolName = tool.name; toolNames.set(source.id, toolName)
+			}
 			budget.take()
-			const response = record(await handle.callTool(tool.name, { id: event.objectId }))
+			const response = record(await handle.callTool(toolName, { id: event.objectId }))
 			if (response.isError) throw new Error("Object unavailable")
 			let row = record(response.structuredContent)
 			if (!Object.keys(row).length && Array.isArray(response.content)) {

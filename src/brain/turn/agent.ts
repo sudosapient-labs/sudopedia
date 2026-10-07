@@ -117,9 +117,13 @@ export class CompanyBrainAgent extends Agent<Env, CompanyBrainState> {
 	}
 
 	async queryExternalKnowledge(principal: import("../../external/contracts").Principal,
-		input: import("../../external/contracts").KnowledgeInput | null, sourcePage?: number) {
+		input: import("../../external/contracts").KnowledgeInput | null, sourcePage?: number, deadline?: number, requestId?: string) {
 		const { queryExternalKnowledge } = await import("../knowledge/query")
-		return queryExternalKnowledge(this, principal, input, sourcePage)
+		return queryExternalKnowledge(this, principal, input, sourcePage, deadline, requestId)
+	}
+	async cancelExternalKnowledgeQuery(principal: import("../../external/contracts").Principal, requestId: string) {
+		const { cancelExternalKnowledgeQuery } = await import("../knowledge/query")
+		cancelExternalKnowledgeQuery(this, principal, requestId)
 	}
 
 	waitUntil(promise: Promise<unknown>): void {

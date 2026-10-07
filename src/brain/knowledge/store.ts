@@ -14,6 +14,7 @@ export const evidenceSchema = z.object({
 	sourceId: id, eventId: id, objectId: id, version: time, occurredAt: time,
 	observedAt: time, deleted: z.boolean(), url: z.string().max(2048),
 	text: z.string().max(32_768), audience: audienceSchema, context: z.string().max(8192).optional(),
+	contentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(), contentVersion: time.optional(),
 }).strict()
 export const proposalSchema = z.object({
 	subject: z.string().min(1).max(512), predicate: z.string().min(1).max(256),
@@ -131,7 +132,8 @@ function head(agent: KnowledgeAgent, sourceId: string, objectId: string): Head |
 	return agent.sql<Head>`SELECT version, occurred_at, event_id, deleted FROM knowledge_head WHERE source_id = ${sourceId} AND object_id = ${objectId}`[0]
 }
 function isHead(agent: KnowledgeAgent, event: EvidenceEvent) {
-	return head(agent, event.sourceId, event.objectId)?.event_id === event.eventId
+	const current = head(agent, event.sourceId, event.objectId)
+	return current?.event_id === event.eventId && current.version === event.version && current.occurred_at === event.occurredAt && current.deleted === Number(event.deleted)
 }
 
 function pruneFactHistory(agent: KnowledgeAgent, count: number): void {
@@ -303,7 +305,16 @@ function explicitlyLinked(a: EvidenceEvent, b: EvidenceEvent): boolean {
 	return (a.sourceId !== b.sourceId || a.objectId !== b.objectId) && (mentions(a.text, b.objectId) || mentions(a.text, b.url))
 }
 
-export function commitKnowledge(agent: KnowledgeAgent, sourceId: string, inputIds: string[], inputs: FactProposal[], processedThrough: number, permittedContext?: EvidenceEvent[]): void {
+type ReasoningSnapshot = { batch: EvidenceEvent[]; context: EvidenceEvent[]; sources: string[] }
+function sourceSnapshot(source: KnowledgeSource): string {
+	return JSON.stringify([source.id, source.orgId, source.connectionId, source.provider, source.ownerUserId, source.state, source.audience])
+}
+/** Capture before the model await, including uncited inputs and source policy. */
+export function captureReasoningSnapshot(agent: KnowledgeAgent, batch: EvidenceEvent[], context: EvidenceEvent[]): ReasoningSnapshot {
+	return JSON.parse(JSON.stringify({ batch, context, sources: [...new Set([...batch, ...context].map(event => event.sourceId))].map(id => sourceSnapshot(liveSource(agent, id))) }))
+}
+
+export function commitKnowledge(agent: KnowledgeAgent, sourceId: string, inputIds: string[], inputs: FactProposal[], processedThrough: number, permittedContext?: EvidenceEvent[], expected?: ReasoningSnapshot, advanceWatermark = true): void {
 	bounded(inputs)
 	const context = permittedContext === undefined ? undefined : z.array(evidenceSchema).max(30).parse(permittedContext)
 	if (context && new TextEncoder().encode(JSON.stringify(context)).length > 128_000) throw new Error("Context payload exceeds budget")
@@ -313,6 +324,11 @@ export function commitKnowledge(agent: KnowledgeAgent, sourceId: string, inputId
 	time.parse(processedThrough)
 	atomic(agent, () => {
 		const source = liveSource(agent, sourceId)
+		if (expected) {
+			if (JSON.stringify(expected.batch.map(event => event.eventId)) !== JSON.stringify(ids) || JSON.stringify(expected.context) !== JSON.stringify(context ?? [])) throw new Error("Reasoning snapshot mismatch")
+			const sources = [...new Set([...expected.batch, ...expected.context].map(event => event.sourceId))].map(id => sourceSnapshot(liveSource(agent, id)))
+			if (JSON.stringify(sources) !== JSON.stringify(expected.sources)) throw new Error("Source snapshot changed")
+		}
 		const permitted = new Map<string, EvidenceEvent>()
 		for (const supplied of context ?? []) {
 			const row = uniqueEvent(agent, supplied.eventId)
@@ -322,15 +338,24 @@ export function commitKnowledge(agent: KnowledgeAgent, sourceId: string, inputId
 			permitted.set(stored.eventId, stored)
 		}
 		const batch = new Map<string, EvidenceEvent>()
+		let replayed = 0
 		for (const eventId of ids) {
 			const row = agent.sql<{ data: string; pending: number }>`SELECT data, pending FROM knowledge_event WHERE source_id = ${sourceId} AND event_id = ${eventId}`[0]
 			if (!row) {
-				if (agent.sql`SELECT 1 FROM knowledge_receipt WHERE source_id = ${sourceId} AND event_id = ${eventId}`.length) continue
+				if (!expected && agent.sql`SELECT 1 FROM knowledge_receipt WHERE source_id = ${sourceId} AND event_id = ${eventId}`.length) { replayed++; continue }
 				throw new Error("Unknown batch event")
 			}
 			const event: EvidenceEvent = JSON.parse(row.data)
-			if (row.pending && isHead(agent, event)) batch.set(eventId, event)
+			if (!isHead(agent, event) || event.deleted) throw new Error("Stale batch evidence reference")
+			const stored = currentEvidence(agent, event, source.orgId)
+			if (expected && JSON.stringify(evidenceSchema.parse(stored)) !== JSON.stringify(expected.batch.find(input => input.eventId === eventId))) throw new Error("Batch evidence mismatch")
+			if (!row.pending) { replayed++; continue }
+			batch.set(eventId, stored)
 		}
+		// Fully committed, unchanged replay is harmless; mixed pending/processed
+		// inputs are stale inference, never a smaller permission-broadened batch.
+		if (replayed && batch.size) throw new Error("Batch pending state changed")
+		if (!batch.size) return
 		// Model-selected citations cannot prove which inputs influenced its output.
 		// Taint every output with ALL supplied inputs and their invalidation dependencies.
 		const reasoningInputs = [...batch.values(), ...permitted.values()]
@@ -381,7 +406,7 @@ export function commitKnowledge(agent: KnowledgeAgent, sourceId: string, inputId
 		const count = agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM knowledge_fact`[0]!.n
 		if (count > MAX_FACTS) pruneFactHistory(agent, count - MAX_FACTS)
 		if (agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM knowledge_fact`[0]!.n > MAX_FACTS) throw new Error("Current fact capacity exceeded; batch remains pending")
-		source.processedThrough = Math.max(source.processedThrough ?? 0, processedThrough)
+		if (advanceWatermark) source.processedThrough = Math.max(source.processedThrough ?? 0, processedThrough)
 		source.lastProcessedAt = Date.now()
 		agent.sql`UPDATE knowledge_source SET data = ${JSON.stringify(source)} WHERE id = ${sourceId}`
 	})

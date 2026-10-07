@@ -39,6 +39,10 @@ export interface EvidenceEvent {
 	text: string
 	audience: Audience
 	context?: string
+	/** Full-content identity before clipping/redaction; never a source credential. */
+	contentFingerprint?: string
+	/** Provider's content edit timestamp, distinct from webhook delivery ordering. */
+	contentVersion?: number
 }
 
 export interface FactProposal {

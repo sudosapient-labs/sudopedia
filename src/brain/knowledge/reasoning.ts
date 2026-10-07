@@ -5,6 +5,8 @@ import { TRIAGE_MODEL } from "../turn/model-profile"
 import { evidenceSchema, proposalSchema } from "./store"
 import type { EvidenceEvent, FactProposal } from "./types"
 export type * from "./types"
+export const MAX_REASONING_EVENTS = 3
+export const MAX_REASONING_CONTEXT = 2
 
 /** Env-local equivalent of the shared configured fastModel; avoids global env mutation. */
 export function fastModel(env: Env) {
@@ -12,8 +14,8 @@ export function fastModel(env: Env) {
 }
 
 export async function reasonEvents(env: Env, events: EvidenceEvent[], context: EvidenceEvent[] = [], signal: AbortSignal = AbortSignal.timeout(20_000)): Promise<FactProposal[]> {
-	const batch = z.array(evidenceSchema).max(100).parse(events)
-	const permittedContext = z.array(evidenceSchema).max(30).parse(context)
+	const batch = z.array(evidenceSchema).max(MAX_REASONING_EVENTS).parse(events)
+	const permittedContext = z.array(evidenceSchema).max(MAX_REASONING_CONTEXT).parse(context)
 	if (new TextEncoder().encode(JSON.stringify(permittedContext)).length > 128_000) throw new Error("Context payload exceeds budget")
 	const payload = JSON.stringify({ events: batch, context: permittedContext })
 	if (new TextEncoder().encode(payload).length > 512_000) throw new Error("Reasoning payload exceeds budget")
