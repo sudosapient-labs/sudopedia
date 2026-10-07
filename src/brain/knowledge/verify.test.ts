@@ -16,6 +16,31 @@ beforeEach(() => {
 	mocks.call.mockResolvedValue({ structuredContent: { id: "issue", updatedAt: new Date(1000).toISOString() } })
 })
 describe("live provider object access", () => {
+	it.each(["late", "racing"])("closes a provider handle completing %s cancellation, exactly once", async timing => {
+		let resolveOpen!: (handle: unknown) => void
+		const opened = new Promise(resolve => { resolveOpen = resolve })
+		mocks.open.mockReturnValue(opened)
+		const controller = new AbortController(), verifier = evidenceVerifier({} as Env, Date.now() + 1000, controller.signal)
+		const pending = verifier.verify(source, event)
+		await Promise.resolve(); await Promise.resolve()
+		expect(mocks.open).toHaveBeenCalledOnce()
+		const handle = { callTool: mocks.call, close: mocks.close }
+		if (timing === "racing") resolveOpen(handle)
+		controller.abort(); await verifier.close()
+		if (timing === "late") resolveOpen(handle)
+		expect(await pending).toBe(false)
+		await Promise.resolve(); await verifier.close()
+		expect(mocks.close).toHaveBeenCalledOnce()
+		expect(mocks.inspect).not.toHaveBeenCalled(); expect(mocks.call).not.toHaveBeenCalled()
+	})
+	it("does not open a provider when disposal occurred during account lookup", async () => {
+		let resolveConnection!: (connection: unknown) => void
+		mocks.connection.mockReturnValue(new Promise(resolve => { resolveConnection = resolve }))
+		const verifier = evidenceVerifier({} as Env), pending = verifier.verify(source, event)
+		await verifier.close()
+		resolveConnection({ orgId: "org", status: "active", serverUrl: "https://mcp.linear.app/mcp" })
+		expect(await pending).toBe(false); expect(mocks.open).not.toHaveBeenCalled()
+	})
 	it.each([15, 25, 100])("checks full content identity across clipping/redaction with page size %i", async limit => {
 		const slackSource = { ...source, provider: "slack", audience: { kind: "slack_channel" as const, teamId: "T1", channelId: "C1" } }
 		const raw = { ts: "1.000001", user: "U1", text: "x".repeat(2500) + " password=supersecret " + "y".repeat(14000) }

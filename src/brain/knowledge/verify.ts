@@ -12,13 +12,22 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancell
 	const handles = new Map<string, ToolProviderHandle>()
 	const toolNames = new Map<string, string>()
 	const cache = new Map<string, boolean>()
+	let disposed = false
+	const active = () => !disposed && Date.now() < deadline && !cancellation?.aborted
+	const assertActive = () => { if (!active()) throw new Error("Verifier disposed") }
+	const closing = new Map<ToolProviderHandle, Promise<void>>()
+	const closeHandle = (handle: ToolProviderHandle) => {
+		let promise = closing.get(handle)
+		if (!promise) { promise = Promise.resolve().then(() => handle.close()).catch(() => {}); closing.set(handle, promise) }
+		return promise
+	}
 	// Runtime emits at most 3 batch + 2 context objects. This bounded allowance
 	// also covers separate MCP setup/catalog reservations for all five sources.
 	const budget = new KnowledgeBudget(40, deadline, cancellation)
 	let incomplete = false
 	const verify = async (source: KnowledgeSource, event: EvidenceEvent, historical = false): Promise<boolean> => {
 		const key = `${source.id}:${event.objectId}:${event.version}:${event.contentFingerprint ?? "legacy"}:${historical}`
-		if (Date.now() >= deadline || cancellation?.aborted) { incomplete = true; return false }
+		if (!active()) { incomplete = true; return false }
 		if (cache.has(key)) return cache.get(key)!
 		try {
 			if (source.provider === "slack") {
@@ -26,14 +35,17 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancell
 				budget.take()
 				const workspace = await env.DB.prepare("SELECT bot_token_enc FROM slack_workspace WHERE org_id=? AND team_id=? LIMIT 1")
 					.bind(source.orgId, source.audience.teamId).first<{ bot_token_enc: string }>()
+				assertActive()
 				if (!workspace) throw new Error("Installation unavailable")
 				const token = await slackKnowledgeToken(env, workspace.bot_token_enc)
+				assertActive()
 				const root = event.context?.replace(/^slack-thread:/, "") ?? event.objectId
 				const reply = root !== event.objectId
 				const response = await slackKnowledgeRequest(token, reply ? "conversations.replies" : "conversations.history", {
 					channel: source.audience.channelId, ...(reply ? { ts: root } : {}), oldest: event.objectId,
 					latest: event.objectId, inclusive: "true", limit: "1",
 				}, budget)
+				assertActive()
 				const raw = Array.isArray(response.messages) ? response.messages.find(message => record(message).ts === event.objectId) : undefined
 				const live = raw ? slackEvidence(source, raw, Date.now()) : null
 				// Webhook delivery time can differ from Slack's edit timestamp. Match
@@ -49,13 +61,23 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancell
 			}
 			if (source.provider !== "linear") throw new Error("No verified object access adapter")
 			const connection = await getConnectionById(env, source.connectionId)
+			assertActive()
 			if (!connection || connection.orgId !== source.orgId || connection.status !== "active" ||
 				!connection.serverUrl || new URL(connection.serverUrl).hostname !== "mcp.linear.app") throw new Error("Connection unavailable")
 			let handle = handles.get(source.id)
-			if (!handle) { handle = await openKnowledgeProvider(env, connection, budget); handles.set(source.id, handle) }
+			if (!handle) {
+				handle = await openKnowledgeProvider(env, connection, budget)
+				if (!active()) {
+					// Cleanup may already have run while connection setup was pending.
+					// Observe late cleanup without extending the response deadline.
+					void closeHandle(handle); throw new Error("Verifier disposed")
+				}
+				handles.set(source.id, handle)
+			}
 			let toolName = toolNames.get(source.id)
 			if (!toolName) {
 				const tools = await inspectKnowledgeTools(handle, budget)
+				assertActive()
 				const tool = tools.find(t => t.name === "get_issue" && t.annotations?.destructiveHint !== true && t.annotations?.readOnlyHint !== false)
 				const props = record(tool?.inputSchema.properties)
 				if (!tool || record(props.id).type !== "string" || (tool.inputSchema.required ?? []).some(k => k !== "id")) throw new Error("Unsupported permission schema")
@@ -63,6 +85,7 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancell
 			}
 			budget.take()
 			const response = record(await handle.callTool(toolName, { id: event.objectId }))
+			assertActive()
 			if (response.isError) throw new Error("Object unavailable")
 			let row = record(response.structuredContent)
 			if (!Object.keys(row).length && Array.isArray(response.content)) {
@@ -81,6 +104,8 @@ export function evidenceVerifier(env: Env, deadline = Date.now() + 7000, cancell
 		} catch { incomplete = true; cache.set(key, false); return false }
 	}
 	return { verify, incomplete: () => incomplete, close: async () => {
-		await Promise.all([...handles.values()].map(h => h.close().catch(() => {})))
+		disposed = true
+		await Promise.all([...handles.values()].map(closeHandle))
+		handles.clear()
 	} }
 }

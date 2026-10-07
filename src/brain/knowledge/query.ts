@@ -4,7 +4,7 @@ import { jsonBytes, MAX_RESULT_BYTES } from "../../external/limits"
 import { brainAgent, type CompanyBrainAgent } from "../turn/agent"
 import { knowledgeAccess } from "./access"
 import { evidenceVerifier } from "./verify"
-import { ensureKnowledgeTables, listSources, queryKnowledge } from "./store"
+import { ensureKnowledgeTables, getSource, listSources, queryKnowledge } from "./store"
 import { deadlineSignal, withAbort } from "../../external/deadline"
 
 // Leave room for live Slack membership pagination within the permission budget.
@@ -18,6 +18,9 @@ function queryLeases(agent: CompanyBrainAgent) {
 	return rows
 }
 const actorKey = (principal: Principal) => JSON.stringify([principal.orgId, principal.userId, principal.credentialId])
+const sourcePolicy = (source: ReturnType<typeof getSource>) => source && JSON.stringify([
+	source.id, source.orgId, source.connectionId, source.provider, source.ownerUserId, source.audience,
+])
 export function cancelExternalKnowledgeQuery(agent: CompanyBrainAgent, principal: Principal, requestId: string) {
 	if (agent.name !== principal.orgId || !/^[a-f0-9-]{36}$/.test(requestId)) return
 	const rows = queryLeases(agent), prior = rows.get(requestId)
@@ -54,16 +57,6 @@ export async function queryExternalKnowledge(agent: CompanyBrainAgent,
 		if (await withAbort(access.source(source, true), signal)) visible.push(source)
 		if (input && await withAbort(access.source(source), signal)) allowed.push(source)
 	}
-	const now = Date.now()
-	const status = visible.map((source) => ({
-		id: source.id, provider: source.provider, state: source.state, coverage: source.coverage,
-		lastCheckedAt: source.lastCheckedAt, lastProcessedAt: source.lastProcessedAt,
-		processedThrough: source.processedThrough, nextCheckAt: source.nextCheckAt,
-		delayMs: source.processedThrough === null ? null : Math.max(0, now - source.processedThrough),
-		stale: source.state !== "active" || source.lastProcessedAt === null ||
-			source.processedThrough === null || now - source.processedThrough > source.intervalMs * 2,
-		error: source.error,
-	}))
 	const result = input ? queryKnowledge(agent, allowed.map((s) => s.id), input.query, input.limit, input.recall === "historical") : { facts: [], truncated: false }
 	// Store restricts every evidence dependency to the allowed source set. This
 	// second check protects per-event audiences narrower than their source.
@@ -81,17 +74,39 @@ export async function queryExternalKnowledge(agent: CompanyBrainAgent,
 		}
 		// Verify complete retained evidence, then return bounded excerpts. One long
 		// source body should not crowd every answer out of the response envelope.
-		if (authorized) facts.push({ ...fact, evidence: fact.evidence.map(event => ({ ...event, contentFingerprint: undefined, text: event.text.slice(0, 512) })) })
+		if (authorized) facts.push(fact)
 	}
 	} finally { await withAbort(verifier.close(), signal).catch(() => {}) }
 	signal.throwIfAborted()
+	// No await below this point: DO writes may interleave with provider/cleanup
+	// awaits above. Revalidate the exact facts and every input source's policy
+	// synchronously before releasing any excerpt or current-state claim.
+	const unchanged = (source: typeof sources[number]) => {
+		const current = getSource(agent, source.id)
+		return current && current.state !== "revoked" && (current.state !== "unsupported" || source.state === "unsupported") && sourcePolicy(current) === sourcePolicy(source)
+	}
+	const finalAllowed = allowed.filter(unchanged)
+	const finalKnowledge = input ? queryKnowledge(agent, finalAllowed.map(s => s.id), input.query, input.limit, input.recall === "historical") : { facts: [], truncated: false }
+	const finalFacts = new Map(finalKnowledge.facts.map(fact => [fact.id, JSON.stringify(fact)]))
+	const retainedFacts = facts.filter(fact => finalFacts.get(fact.id) === JSON.stringify(fact))
+	const changed = retainedFacts.length !== facts.length || finalAllowed.length !== allowed.length || visible.some(source => !unchanged(source))
+	const now = Date.now()
+	const status = visible.filter(unchanged).map(old => getSource(agent, old.id)!).map(source => ({
+		id: source.id, provider: source.provider, state: source.state, coverage: source.coverage,
+		lastCheckedAt: source.lastCheckedAt, lastProcessedAt: source.lastProcessedAt,
+		processedThrough: source.processedThrough, nextCheckAt: source.nextCheckAt,
+		delayMs: source.processedThrough === null ? null : Math.max(0, now - source.processedThrough),
+		stale: source.state !== "active" || source.lastProcessedAt === null || source.processedThrough === null || now - source.processedThrough > source.intervalMs * 2,
+		error: source.error,
+	}))
 	const moreSources = sources.length > (page + 1) * SOURCE_PAGE_SIZE
-	const output = { facts, sources: status, truncated: result.truncated || moreSources,
+	const output = { facts: retainedFacts.map(fact => ({ ...fact, evidence: fact.evidence.map(event => ({ ...event, contentFingerprint: undefined, text: event.text.slice(0, 512) })) })), sources: status, truncated: result.truncated || finalKnowledge.truncated || moreSources,
 		nextSourcePage: moreSources ? page + 1 : null,
-		accessCoverageIncomplete: access.incomplete() || verifier.incomplete(), asOf: now,
+		accessCoverageIncomplete: changed || access.incomplete() || verifier.incomplete(), asOf: now,
 		interpretation: "Recorded source state is not proof of active work right now. Unsupported, partial, stale or failed sources limit coverage. Historical facts are not current truth. Missing evidence is not evidence of absence." }
 	while (jsonBytes(output) > MAX_RESULT_BYTES && output.facts.length) { output.facts.pop(); output.truncated = true }
 	while (jsonBytes(output) > MAX_RESULT_BYTES && output.sources.length) { output.sources.pop(); output.truncated = true }
+	if (Date.now() >= deadline) throw new ExternalError("upstream_timeout", 504, "Knowledge query deadline exceeded")
 	return output
 	} catch (error) {
 		if (signal.aborted) throw new ExternalError("upstream_timeout", 504, "Knowledge query cancelled or deadline exceeded")

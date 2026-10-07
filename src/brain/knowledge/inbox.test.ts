@@ -28,6 +28,29 @@ function setup() {
 const delivery = (id: string, event: Record<string, unknown> = {}) => ({ type: "event_callback", team_id: "T1", event_id: id,
 	event: { type: "message", channel: "C1", ts: "1700000000.000001", text: "A commitment", ...event } })
 describe("durable signed Slack inbox", () => {
+	it("retains known-channel deletions across downtime longer than quarantine TTL", async () => {
+		const { agent, sqlite } = setup()
+		await receiveSlackKnowledge(agent, delivery("old-delete", { subtype: "message_deleted", deleted_ts: "1700000000.000001" }))
+		sqlite.prepare("UPDATE knowledge_slack_inbox SET received_at=?").run(Date.now() - 3 * 86_400_000)
+		await receiveSlackKnowledge(agent, delivery("fresh"))
+		expect(sqlite.prepare("SELECT processed,attempts,data FROM knowledge_slack_inbox WHERE event_id='old-delete'").get()).toMatchObject({ processed: 0, attempts: 0, data: expect.stringContaining("message_deleted") })
+		mocks.ingest.mockResolvedValue(true)
+		await drainSlackKnowledgeInbox(agent)
+		expect(mocks.ingest).toHaveBeenCalledWith(agent, expect.objectContaining({ event_id: "old-delete" }), undefined)
+	})
+	it("rescues quarantined work when its channel was discovered before expiry", async () => {
+		const { agent, sqlite } = setup()
+		await receiveSlackKnowledge(agent, delivery("old", { channel: "C2" }))
+		await drainSlackKnowledgeInbox(agent)
+		sqlite.prepare("UPDATE knowledge_slack_inbox SET received_at=?").run(Date.now() - 3 * 86_400_000)
+		const row = sqlite.prepare("SELECT data FROM knowledge_source").get() as { data: string }
+		const discovered = { ...JSON.parse(row.data), id: "slack:T1:C2", audience: { kind: "slack_channel", teamId: "T1", channelId: "C2" } }
+		agent.sql`INSERT INTO knowledge_source(id,data) VALUES(${discovered.id},${JSON.stringify(discovered)})`
+		await receiveSlackKnowledge(agent, delivery("fresh"))
+		expect(sqlite.prepare("SELECT processed,disposition FROM knowledge_slack_inbox WHERE event_id='old'").get()).toMatchObject({ processed: 0, disposition: "pending" })
+		mocks.ingest.mockResolvedValue(true); await drainSlackKnowledgeInbox(agent)
+		expect(mocks.ingest).toHaveBeenCalledWith(agent, expect.objectContaining({ event_id: "old" }), undefined)
+	})
 	it("shares the tick deadline and honors provider Retry-After", async () => {
 		const { agent, sqlite } = setup()
 		await receiveSlackKnowledge(agent, delivery("limited"))

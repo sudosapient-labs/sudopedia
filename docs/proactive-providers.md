@@ -76,6 +76,10 @@ Slack revoked/invalid deliveries are terminally scrubbed. Unknown-source deliver
 
 One absolute eight-second deadline spans Worker agent lookup, RPC dispatch, permission checks and live evidence verification. An actor-bound request identity carries cancellation to the Durable Object; a late cancellation cannot cancel another actor's request. Individual waits are bounded even when a local D1/RPC promise itself cannot be cancelled, and no later phase receives a fresh budget.
 
+Queries synchronously revalidate the exact retained facts and every supporting source policy after all verification/cleanup awaits, before returning any excerpt. Facts invalidated or restricted while a query was in flight are dropped and coverage is marked incomplete. Source health is rebuilt from that final snapshot; unsupported-source metadata remains visible when its policy is unchanged. This local final check does not claim an atomic transaction across remote providers.
+
+Quarantine expiry reclassifies aged pending/quarantined deliveries against current discovery and expires only confirmed unknown sources. Known authorized edits/deletions are retained through long outages; newly discovered channels rescue quarantined work. Verifier cleanup marks the request disposed before closing registered handles, and any provider handle that finishes opening afterward is closed separately without extending the response deadline.
+
 - Linear official MCP documentation: <https://linear.app/docs/mcp>. Tool argument/continuation schemas are verified against the authenticated server's live catalog, not assumed from this overview.
 - Linear signed webhooks: <https://linear.app/developers/webhooks>.
 - Granola MCP: <https://docs.granola.ai/help-center/sharing/integrations/mcp>; separate REST API: <https://docs.granola.ai/api-reference/list-notes>; webhooks: <https://docs.granola.ai/webhooks>.

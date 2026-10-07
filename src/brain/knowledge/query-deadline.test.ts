@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { sqliteFixture } from "../../../test/external/sqlite"
 import type { CompanyBrainAgent } from "../turn/agent"
 import type { Principal } from "../../external/contracts"
-import { commitKnowledge, ensureKnowledgeTables, stageEvents, upsertSource } from "./store"
+import { commitKnowledge, ensureKnowledgeTables, stageEvents, upsertSource, revokeSource } from "./store"
 import type { KnowledgeSource } from "./types"
 const mocks = vi.hoisted(() => ({ access: vi.fn(), verify: vi.fn(), makeVerifier: vi.fn(), source: vi.fn() }))
 vi.mock("../turn/agent", () => ({ brainAgent: (agent: unknown) => agent }))
@@ -34,6 +34,40 @@ beforeEach(() => {
 })
 afterEach(() => fixtures.splice(0).forEach(f => f.sqlite.close()))
 describe("one absolute knowledge-query deadline", () => {
+	it.each(["verification", "cleanup"])("withholds revoked/narrowed/invalidated facts changed during %s", async phase => {
+		for (const change of ["revoke", "narrow", "edit", "delete"] as const) {
+			const agent = setup()
+			const mutate = () => {
+				if (change === "revoke") revokeSource(agent, source.id)
+				else if (change === "narrow") upsertSource(agent, { ...source, audience: { kind: "users", userIds: ["b"] } })
+				else stageEvents(agent, source, [{ sourceId: source.id, eventId: "new", objectId: "issue", version: 2000, occurredAt: 1000, observedAt: 2000, deleted: change === "delete", url: "https://linear.app/test", text: "Changed", audience: source.audience }])
+			}
+			mocks.verify.mockImplementation(async () => { if (phase === "verification") mutate(); return true })
+			mocks.makeVerifier.mockImplementation(() => ({ verify: mocks.verify, incomplete: () => false, close: async () => { if (phase === "cleanup") mutate() } }))
+			const result = await queryExternalKnowledge(agent, principal, { query: "Started", limit: 10, recall: "current", sourcePage: 0 })
+			expect(result.facts).toEqual([])
+			expect(result.accessCoverageIncomplete).toBe(true)
+		}
+	})
+	it.each(["verification", "cleanup"])("never exposes uncited private input revoked during %s", async phase => {
+		const agent = setup(), other: KnowledgeSource = { ...source, id: "private", connectionId: "private-conn" }
+		upsertSource(agent, other)
+		const input = { sourceId: other.id, eventId: "private-input", objectId: "private-object", version: 1000, occurredAt: 1000, observedAt: 1000, deleted: false, url: "https://linear.app/private", text: "PRIVATE_DETAIL", audience: other.audience }
+		stageEvents(agent, other, [input]); commitKnowledge(agent, other.id, [input.eventId], [], 1000)
+		const anchor = { ...input, sourceId: source.id, eventId: "anchor", objectId: "issue", version: 2000, text: "Public discussion" }
+		stageEvents(agent, source, [anchor])
+		commitKnowledge(agent, source.id, [anchor.eventId], [{ subject: "Issue", predicate: "status", value: "Private summary", evidenceIds: [anchor.eventId], confidence: "confirmed" }], 2000, [input])
+		mocks.verify.mockImplementation(async () => { if (phase === "verification") revokeSource(agent, other.id); return true })
+		mocks.makeVerifier.mockImplementation(() => ({ verify: mocks.verify, incomplete: () => false, close: async () => { if (phase === "cleanup") revokeSource(agent, other.id) } }))
+		const result = await queryExternalKnowledge(agent, principal, { query: "Private", limit: 10, recall: "historical", sourcePage: 0 })
+		expect(result.facts).toEqual([]); expect(JSON.stringify(result)).not.toContain("PRIVATE_DETAIL")
+	})
+	it("keeps unsupported-source health visible when its policy did not change", async () => {
+		const agent = setup()
+		upsertSource(agent, { ...source, state: "unsupported", coverage: ["no_verified_scan_adapter"] })
+		const result = await queryExternalKnowledge(agent, principal, null)
+		expect(result.sources[0]).toMatchObject({ state: "unsupported", coverage: ["no_verified_scan_adapter"] })
+	})
 	it("does not reset the deadline between slow access and evidence phases", async () => {
 		const agent = setup(), deadline = Date.now() + 100
 		mocks.source.mockImplementation(async () => { await new Promise(resolve => setTimeout(resolve, 15)); return true })

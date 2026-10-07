@@ -25,11 +25,29 @@ function currentIdentity(agent: CompanyBrainAgent, base: string): string {
 const QUARANTINE_TTL = 86_400_000
 
 function expireQuarantine(agent: CompanyBrainAgent) {
+	const sourceStates = new Map<string, "ready" | "unknown" | "terminal">()
+	// Admission can run before the first drain after downtime. Classify expired
+	// pending/quarantined rows against current discovery; known work is NOT TTL
+	// data and must survive long outages, especially edits/deletions.
+	for (const row of agent.sql<{ event_id: string; data: string }>`SELECT event_id,data FROM knowledge_slack_inbox WHERE processed=0 AND disposition IN ('pending','quarantine') AND received_at <= ${Date.now() - QUARANTINE_TTL} LIMIT 1000`) {
+		let disposition: "ready" | "unknown" | "terminal" = "terminal"
+		try {
+			const parsed = deliverySchema.safeParse(JSON.parse(row.data))
+			if (parsed.success) {
+				const key = JSON.stringify([parsed.data.team_id, parsed.data.event.channel])
+				disposition = sourceStates.get(key) ?? localSlackDisposition(agent, parsed.data)
+				sourceStates.set(key, disposition)
+			}
+		} catch { /* Malformed payloads are terminal, not unverified knowledge. */ }
+		if (disposition === "ready") agent.sql`UPDATE knowledge_slack_inbox SET disposition='pending',next_attempt=0 WHERE event_id=${row.event_id}`
+		else if (disposition === "unknown") agent.sql`UPDATE knowledge_slack_inbox SET disposition='quarantine' WHERE event_id=${row.event_id}`
+		else agent.sql`UPDATE knowledge_slack_inbox SET processed=1,data='',disposition='invalid' WHERE event_id=${row.event_id}`
+	}
 	// Bulk expiry also runs at admission: a full unresolved queue cannot prevent
 	// new deliveries forever, even when tick budgets are exhausted.
-	const expired = agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM knowledge_slack_inbox WHERE processed=0 AND disposition != 'retry' AND received_at <= ${Date.now() - QUARANTINE_TTL}`[0]!.n
+	const expired = agent.sql<{ n: number }>`SELECT COUNT(*) AS n FROM knowledge_slack_inbox WHERE processed=0 AND disposition = 'quarantine' AND received_at <= ${Date.now() - QUARANTINE_TTL}`[0]!.n
 	if (!expired) return
-	agent.sql`UPDATE knowledge_slack_inbox SET processed=1,data='',disposition='quarantine_expired' WHERE processed=0 AND disposition != 'retry' AND received_at <= ${Date.now() - QUARANTINE_TTL}`
+	agent.sql`UPDATE knowledge_slack_inbox SET processed=1,data='',disposition='quarantine_expired' WHERE processed=0 AND disposition = 'quarantine' AND received_at <= ${Date.now() - QUARANTINE_TTL}`
 	ensureKnowledgeTables(agent)
 	const key = "slack-inbox:quarantine-expired"
 	const prior = agent.sql<{ value: string }>`SELECT value FROM brain_knowledge_runtime WHERE key=${key}`[0]
